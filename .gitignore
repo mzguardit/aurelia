@@ -1,0 +1,37 @@
+# Aurelia VPN - .gitignore
+
+# Build outputs & compilers
+build/
+build-*/
+x64/
+x86/
+Release/
+Debug/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.exe
+*.res
+*.tlog
+
+# Whitelist third_party prebuilt dependencies so repo builds out-of-the-box
+!third_party/**/*.dll
+!third_party/**/*.exe
+
+# IDE and editors
+.vs/
+.vscode/
+*.VC.db
+*.opendb
+
+# Runtime files & local configuration
+settings.ini
+*.log
+*.tmp
+hev.log
+
+# Large distribution zip (distribute via GitHub Releases)
+Release.zip

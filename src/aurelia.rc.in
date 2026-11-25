@@ -1,0 +1,3 @@
+#include <windows.h>
+#define IDI_AURELIA 101
+IDI_AURELIA ICON "@AURELIA_ICON_PATH@"
