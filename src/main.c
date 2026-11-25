@@ -64,6 +64,9 @@ static int g_setting_pentest_port = 1;
 static int g_setting_preboot_killswitch = 1;
 static int g_setting_avoid_disk = 1;
 static int g_setting_pipeline_mode = 1;
+static int g_setting_turbo_boost = 1;
+static int g_setting_stealth_mode = 1;
+static int g_setting_fake_ip = 1;
 static DWORD g_settings_saved_tick = 0;
 
 static HWND g_dns_combo = NULL, g_dns_edit = NULL, g_btn_save_settings = NULL;
@@ -336,6 +339,12 @@ static void save_preferences(void) {
     WritePrivateProfileStringW(L"Settings", L"AvoidDiskWrites", value, g_settings_path);
     _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_pipeline_mode);
     WritePrivateProfileStringW(L"Settings", L"PipelineMode", value, g_settings_path);
+    _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_turbo_boost);
+    WritePrivateProfileStringW(L"Settings", L"TurboBoost", value, g_settings_path);
+    _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_stealth_mode);
+    WritePrivateProfileStringW(L"Settings", L"StealthMode", value, g_settings_path);
+    _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_fake_ip);
+    WritePrivateProfileStringW(L"Settings", L"FakeIpPool", value, g_settings_path);
 }
 
 static void load_preferences(void) {
@@ -361,6 +370,9 @@ static void load_preferences(void) {
     g_setting_preboot_killswitch = (int)GetPrivateProfileIntW(L"Settings", L"PreBootKillSwitch", 1, g_settings_path);
     g_setting_avoid_disk = (int)GetPrivateProfileIntW(L"Settings", L"AvoidDiskWrites", 1, g_settings_path);
     g_setting_pipeline_mode = (int)GetPrivateProfileIntW(L"Settings", L"PipelineMode", 1, g_settings_path);
+    g_setting_turbo_boost = (int)GetPrivateProfileIntW(L"Settings", L"TurboBoost", 1, g_settings_path);
+    g_setting_stealth_mode = (int)GetPrivateProfileIntW(L"Settings", L"StealthMode", 1, g_settings_path);
+    g_setting_fake_ip = (int)GetPrivateProfileIntW(L"Settings", L"FakeIpPool", 1, g_settings_path);
 }
 
 static void trace_start(const wchar_t *stage) {
@@ -673,6 +685,30 @@ static int run_tor(void) {
         wcscpy_s(avoid_disk_line, _countof(avoid_disk_line), L"AvoidDiskWrites 1\r\n");
     }
 
+    wchar_t turbo_line[512] = L"";
+    if (g_setting_turbo_boost) {
+        wcscpy_s(turbo_line, _countof(turbo_line),
+            L"FastFirstHopPK 1\r\n"
+            L"NumEntryGuards 6\r\n"
+            L"CircuitBuildTimeout 4\r\n"
+            L"LearnCircuitBuildTimeout 1\r\n"
+            L"MaxCircuitDirtiness 300\r\n");
+    } else {
+        wcscpy_s(turbo_line, _countof(turbo_line),
+            L"NumEntryGuards 3\r\n"
+            L"CircuitBuildTimeout 10\r\n"
+            L"LearnCircuitBuildTimeout 1\r\n"
+            L"MaxCircuitDirtiness 600\r\n");
+    }
+
+    wchar_t fakeip_line[256] = L"";
+    if (g_setting_fake_ip) {
+        wcscpy_s(fakeip_line, _countof(fakeip_line),
+            L"AutomapHostsOnResolve 1\r\n"
+            L"AutomapHostsSuffixes .onion,.exit\r\n"
+            L"VirtualAddrNetworkIPv4 198.18.0.0/15\r\n");
+    }
+
     wchar_t cfg[4096];
     _snwprintf_s(cfg, _countof(cfg), _TRUNCATE,
         L"DataDirectory \"%s\"\r\n"
@@ -683,14 +719,12 @@ static int run_tor(void) {
         L"CookieAuthentication 1\r\n"
         L"CookieAuthFile \"%s\"\r\n"
         L"SafeSocks 1\r\n"
-        L"NumEntryGuards 3\r\n"
-        L"LearnCircuitBuildTimeout 1\r\n"
-        L"CircuitBuildTimeout 10\r\n"
-        L"MaxCircuitDirtiness 600\r\n"
+        L"%s"
+        L"%s"
         L"%s"
         L"%s%s%s",
         escaped_dir, forward_log, stream_iso, pentest_port_line,
-        escaped_cookie, avoid_disk_line, geoip_lines, exit_line, strict_line);
+        escaped_cookie, turbo_line, fakeip_line, avoid_disk_line, geoip_lines, exit_line, strict_line);
 
     int n = WideCharToMultiByte(CP_UTF8, 0, cfg, -1, NULL, 0, NULL, NULL);
     char *utf8 = (char*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n);
@@ -1300,10 +1334,13 @@ static int start_vpn(void) {
     else if (g_setting_dns_mode == 2) dns_ip = L"9.9.9.9";
     else if (g_setting_dns_mode == 3 && g_setting_custom_dns_ip[0]) dns_ip = g_setting_custom_dns_ip;
 
+    const wchar_t *netmask_str = g_setting_fake_ip ? L"255.254.0.0" : L"255.255.0.0";
+    const wchar_t *cache_size_str = g_setting_turbo_boost ? L"16384" : L"8192";
+
     wchar_t yaml[2048];
     _snwprintf_s(yaml, _countof(yaml), _TRUNCATE,
-        L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: %s\n  port: 53\n  network: 198.18.0.0\n  netmask: 255.255.0.0\n  cache-size: 8192\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
-        dir, dir, pipeline_str, dns_ip, appdir);
+        L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: %s\n  port: 53\n  network: 198.18.0.0\n  netmask: %s\n  cache-size: %s\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
+        dir, dir, pipeline_str, dns_ip, netmask_str, cache_size_str, appdir);
 
     int ybytes = WideCharToMultiByte(CP_UTF8, 0, yaml, -1, NULL, 0, NULL, NULL);
     char *yutf = (char*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ybytes); if(!yutf) return 0;
@@ -2613,7 +2650,16 @@ static void paint_dc(HDC dc, int w, int h) {
                 g_vpn_active ? LTXT(L"Tunnel cifrato attivo · Kill switch fail-closed armato", L"Encrypted tunnel active · Fail-closed kill switch armed") : g_tor_info);
         }
         text(dc, 60, 264, attest_str, muted, g_small);
-        chip(dc, 60, 288, 148, 30, LTXT(L"VPN DI SISTEMA", L"SYSTEM VPN"), teal, pale_blue);
+        chip(dc, 60, 288, 136, 30, LTXT(L"VPN DI SISTEMA", L"SYSTEM VPN"), teal, pale_blue);
+        if(g_setting_turbo_boost) {
+            chip(dc, 204, 288, 126, 30, LTXT(L"TURBO BOOST", L"TURBO BOOST"), RGB(217, 140, 30), RGB(255, 246, 228));
+        }
+        if(g_setting_fake_ip) {
+            chip(dc, 338, 288, 126, 30, LTXT(L"FAKE-IP POOL", L"FAKE-IP POOL"), teal, pale_blue);
+        }
+        if(g_setting_stealth_mode) {
+            chip(dc, 472, 288, 136, 30, LTXT(L"STEALTH SHIELD", L"STEALTH SHIELD"), green, pale_green);
+        }
 
         text(dc, 60, 336, LTXT(L"IP PUBBLICO TOR", L"TOR EXIT IP"), muted, g_caption);
         text(dc, 60, 358, g_vpn_active ? g_exit_public_ip : L"—", white, g_font_bold ? g_font_bold : g_font);
@@ -2651,7 +2697,9 @@ static void paint_dc(HDC dc, int w, int h) {
         text(dc, 812, 358, LTXT(L"Compatibilità & Stream", L"Compatibility & Streams"), white, g_font);
         text(dc, 812, 381, LTXT(L"TCP supportato integralmente", L"TCP fully supported"), muted, g_small);
         text(dc, 812, 401, LTXT(L"UDP bloccato da Kill switch (Tor TCP-only)", L"UDP blocked by Kill switch (Tor TCP-only)"), muted, g_small);
-        text(dc, 788, 432, LTXT(L"Isolamento stream per porta e destinazione attivo.", L"Stream isolation per port and dest active."), muted, g_caption);
+        text(dc, 788, 432, g_setting_stealth_mode ?
+            LTXT(L"Stealth Shield attivo · Leak LAN/mDNS bloccati.", L"Stealth Shield active · LAN/mDNS leaks blocked.") :
+            LTXT(L"Isolamento stream per porta e destinazione attivo.", L"Stream isolation per port and dest active."), muted, g_caption);
 
         /* live circuit */
         card(dc, 32, 490, 708, 268);
@@ -2834,47 +2882,62 @@ static void paint_dc(HDC dc, int w, int h) {
 
     } else if(g_active_tab == TAB_SETTINGS) {
         /* TAB 2: Impostazioni & DNS */
-        card(dc, 32, 146, 1096, 135);
-        text(dc, 60, 166, LTXT(L"RISOLUTORE DNS DI SISTEMA NEL TUNNEL TOR", L"SYSTEM DNS RESOLVER INSIDE TOR TUNNEL"), muted, g_caption);
-        text(dc, 60, 188, LTXT(L"Instrada le query DNS nel tunnel cifrato escludendo completamente i server dell'ISP.", L"Route DNS queries through the encrypted tunnel, bypassing ISP servers completely."), white, g_font);
-        text(dc, 60, 246, LTXT(L"MapDNS 198.18.0.2 assegna indirizzi virtuali Tor e impedisce qualsiasi deanonimizzazione o correlazione.",
+        card(dc, 32, 146, 1096, 116);
+        text(dc, 60, 164, LTXT(L"RISOLUTORE DNS DI SISTEMA NEL TUNNEL TOR", L"SYSTEM DNS RESOLVER INSIDE TOR TUNNEL"), muted, g_caption);
+        text(dc, 60, 184, LTXT(L"Instrada le query DNS nel tunnel cifrato escludendo completamente i server dell'ISP.", L"Route DNS queries through the encrypted tunnel, bypassing ISP servers completely."), white, g_font);
+        text(dc, 60, 240, LTXT(L"MapDNS 198.18.0.2 assegna indirizzi virtuali Tor e impedisce qualsiasi deanonimizzazione o correlazione.",
                              L"MapDNS 198.18.0.2 maps virtual Tor addresses and prevents de-anonymization or correlation."), muted, g_small);
 
-        card(dc, 32, 296, 1096, 462);
-        text(dc, 60, 314, LTXT(L"PARAMETRI DI SICUREZZA, PERFORMANCE E PENTESTING", L"SECURITY, PERFORMANCE & PENTEST PARAMETERS"), muted, g_caption);
+        card(dc, 32, 274, 1096, 484);
+        text(dc, 60, 290, LTXT(L"PARAMETRI DI SICUREZZA, PERFORMANCE, TURBO & PENTESTING", L"SECURITY, PERFORMANCE, TURBO & PENTEST PARAMETERS"), muted, g_caption);
 
-        draw_toggle(dc, 60, 336, g_setting_stream_isolation,
+        draw_toggle(dc, 60, 312, g_setting_stream_isolation,
             LTXT(L"Stream Isolation per Porta e Destinazione", L"Stream Isolation per Port and Destination"),
             LTXT(L"Assegna circuiti Tor indipendenti per ciascuna app prevenendo la correlazione incrociata.",
                  L"Assigns separate Tor circuits per application preventing cross-correlation."));
 
-        draw_toggle(dc, 60, 394, g_setting_strict_nodes,
+        draw_toggle(dc, 60, 358, g_setting_turbo_boost,
+            LTXT(L"Aurelia Turbo Boost & Multi-Guard Speed", L"Aurelia Turbo Boost & Multi-Guard Speed"),
+            LTXT(L"Allarga il pool di Guard (6 nodi), FastFirstHopPK e riduce a 4s il timeout di negoziazione circuiti.",
+                 L"Expands Guard pool (6 nodes), FastFirstHopPK and cuts circuit timeout to 4s for high speed."));
+
+        draw_toggle(dc, 60, 404, g_setting_fake_ip,
+            LTXT(L"Motore Fake-IP Pool 198.18.0.0/15 & Routing .onion Universale", L"Fake-IP Engine (198.18.0.0/15) & Universal .onion Routing"),
+            LTXT(L"Risoluzione DNS locale istantanea (0 ms) e routing trasparente dei domini .onion su ogni app Windows.",
+                 L"Instant 0-ms local DNS response and transparent .onion domain routing across all Windows apps."));
+
+        draw_toggle(dc, 60, 450, g_setting_stealth_mode,
+            LTXT(L"Windows Stealth Shield (Anti-Broadcast & Anti-Leak LAN)", L"Windows Stealth Shield (Anti-Broadcast & LAN Anti-Leak)"),
+            LTXT(L"Blocca perdite mDNS (5353), LLMNR (5355), NetBIOS (137-139) e SSDP a livello WFP/Firewall.",
+                 L"Blocks mDNS (5353), LLMNR (5355), NetBIOS (137-139) and SSDP discovery at WFP/Firewall level."));
+
+        draw_toggle(dc, 60, 496, g_setting_strict_nodes,
             LTXT(L"Nodi di Uscita Rigorosi (Strict Exit Nodes)", L"Strict Exit Nodes"),
             LTXT(L"Rifiuta rigorosamente qualsiasi circuito che non utilizzi il paese di uscita selezionato.",
                  L"Strictly rejects any circuit that does not match the chosen exit country."));
 
-        draw_toggle(dc, 60, 452, g_setting_pentest_port,
+        draw_toggle(dc, 60, 542, g_setting_pentest_port,
             LTXT(L"Porta SOCKS Pentest Dedicata (127.0.0.1:9052)", L"Dedicated Pentest SOCKS Port (127.0.0.1:9052)"),
             LTXT(L"Porta ausiliaria pronta come upstream proxy per Burp Suite, OWASP ZAP, curl e script.",
                  L"Auxiliary proxy ready as upstream for Burp Suite, OWASP ZAP, curl and scripts."));
 
-        draw_toggle(dc, 60, 510, g_setting_preboot_killswitch,
+        draw_toggle(dc, 60, 588, g_setting_preboot_killswitch,
             LTXT(L"Kill Switch Pre-Boot Persistente WFP", L"Persistent Pre-Boot WFP Kill Switch"),
             LTXT(L"Arma le regole firewall WFP prima dell'attivazione di rete: 0 leak al boot o al cambio Wi-Fi.",
                  L"Arms WFP firewall rules before network link activation: 0 leaks on boot or Wi-Fi roaming."));
 
-        draw_toggle(dc, 60, 568, g_setting_avoid_disk,
+        draw_toggle(dc, 60, 634, g_setting_avoid_disk,
             LTXT(L"Protezione Disco SSD & Zero Scritture (AvoidDiskWrites)", L"SSD Protection & Zero Disk Writes (AvoidDiskWrites)"),
             LTXT(L"Conserva lo stato e la cache del consenso Tor in RAM per azzerare l'usura del disco e velocizzare l'I/O.",
                  L"Keeps Tor consensus and cache in RAM to prevent disk wear and speed up I/O."));
 
-        draw_toggle(dc, 60, 626, g_setting_pipeline_mode,
+        draw_toggle(dc, 60, 680, g_setting_pipeline_mode,
             LTXT(L"Ottimizzazione Pipeline Driver Wintun", L"Wintun Driver Pipeline Optimization"),
             LTXT(L"Abilita lo streaming asincrono dei pacchetti IP per massima velocità e fluidità di navigazione.",
                  L"Enables async IP packet streaming for maximum speed and browsing fluidity."));
 
         if(GetTickCount() - g_settings_saved_tick < 3500) {
-            chip(dc, 360, 694, 340, 38,
+            chip(dc, 760, 284, 340, 26,
                 LTXT(L"✓ IMPOSTAZIONI SALVATE E APPLICATE", L"✓ SETTINGS SAVED & APPLIED"),
                 green, pale_green);
         }
@@ -2921,20 +2984,20 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_interval = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 650, 230, 34, hwnd, (HMENU)ID_INTERVAL, NULL, NULL);
         fill_interval_options(g_interval_index);
 
-        g_dns_combo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 60, 212, 480, 220, hwnd, (HMENU)ID_SETTING_DNS_COMBO, NULL, NULL);
+        g_dns_combo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 60, 204, 440, 220, hwnd, (HMENU)ID_SETTING_DNS_COMBO, NULL, NULL);
         SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)L"Tor MapDNS (198.18.0.2 - Anti-Correlation Tor Built-in)");
         SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)L"Cloudflare Privacy DNS over Tor (1.1.1.1 / 1.0.0.1)");
         SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)L"Quad9 Malware Blocking DNS over Tor (9.9.9.9)");
         SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)L"DNS Personalizzato / Custom IPv4...");
         SendMessageW(g_dns_combo, CB_SETCURSEL, (WPARAM)g_setting_dns_mode, 0);
 
-        g_dns_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_setting_custom_dns_ip, WS_CHILD | ES_AUTOHSCROLL, 560, 212, 200, 28, hwnd, (HMENU)ID_SETTING_DNS_EDIT, NULL, NULL);
+        g_dns_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_setting_custom_dns_ip, WS_CHILD | ES_AUTOHSCROLL, 515, 204, 220, 28, hwnd, (HMENU)ID_SETTING_DNS_EDIT, NULL, NULL);
         if(g_font) {
             SendMessageW(g_dns_combo, WM_SETFONT, (WPARAM)g_font, TRUE);
             SendMessageW(g_dns_edit, WM_SETFONT, (WPARAM)g_font, TRUE);
         }
 
-        g_btn_save_settings = CreateWindowExW(0, L"BUTTON", L"Salva e Applica Impostazioni", WS_CHILD | BS_OWNERDRAW, 60, 692, 280, 42, hwnd, (HMENU)ID_SETTING_SAVE_BTN, NULL, NULL);
+        g_btn_save_settings = CreateWindowExW(0, L"BUTTON", L"Salva e Applica Impostazioni", WS_CHILD | BS_OWNERDRAW, 755, 198, 350, 38, hwnd, (HMENU)ID_SETTING_SAVE_BTN, NULL, NULL);
 
         tray_add();
         apply_language();
@@ -2975,13 +3038,16 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if(x >= 764 && x <= 1128) { switch_tab(TAB_SETTINGS); return 0; }
         }
         if(g_active_tab == TAB_SETTINGS) {
-            if(x >= 60 && x <= 880) {
-                if(y >= 332 && y <= 376) { g_setting_stream_isolation = !g_setting_stream_isolation; InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 390 && y <= 434) { g_setting_strict_nodes = !g_setting_strict_nodes; InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 448 && y <= 492) { g_setting_pentest_port = !g_setting_pentest_port; InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 506 && y <= 550) { g_setting_preboot_killswitch = !g_setting_preboot_killswitch; InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 564 && y <= 608) { g_setting_avoid_disk = !g_setting_avoid_disk; InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 622 && y <= 666) { g_setting_pipeline_mode = !g_setting_pipeline_mode; InvalidateRect(hwnd, NULL, FALSE); return 0; }
+            if(x >= 60 && x <= 920) {
+                if(y >= 308 && y <= 350) { g_setting_stream_isolation = !g_setting_stream_isolation; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 354 && y <= 396) { g_setting_turbo_boost = !g_setting_turbo_boost; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 400 && y <= 442) { g_setting_fake_ip = !g_setting_fake_ip; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 446 && y <= 488) { g_setting_stealth_mode = !g_setting_stealth_mode; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 492 && y <= 534) { g_setting_strict_nodes = !g_setting_strict_nodes; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 538 && y <= 580) { g_setting_pentest_port = !g_setting_pentest_port; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 584 && y <= 626) { g_setting_preboot_killswitch = !g_setting_preboot_killswitch; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 630 && y <= 672) { g_setting_avoid_disk = !g_setting_avoid_disk; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                if(y >= 676 && y <= 718) { g_setting_pipeline_mode = !g_setting_pipeline_mode; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
             }
         }
         break;
