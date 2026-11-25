@@ -1,6 +1,6 @@
 ; Aurelia VPN - Professional Inno Setup Script
 #define MyAppName "Aurelia VPN"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "mzguardit"
 #define MyAppURL "https://github.com/mzguardit/aurelia"
 #define MyAppExeName "aurelia.exe"
@@ -25,7 +25,7 @@ UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=Aurelia-Setup-v1.0.0
+OutputBaseFilename=Aurelia-Setup-v1.0.1
 UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no

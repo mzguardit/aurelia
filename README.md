@@ -66,13 +66,13 @@ Every application on your machine — browsers, terminal sessions, background se
 
 ### Option 1: Windows Installer (Recommended)
 Download and run the official setup:
-- **[Download Aurelia-Setup-v1.0.0.exe](https://github.com/mzguardit/aurelia/releases/download/v1.0.0/Aurelia-Setup-v1.0.0.exe)**
+- **[Download Aurelia-Setup-v1.0.1.exe](https://github.com/mzguardit/aurelia/releases/download/v1.0.1/Aurelia-Setup-v1.0.1.exe)**
   - Self-contained (includes Tor core, Wintun, and all transports).
   - Automatically configures Start Menu and Desktop shortcuts.
   - Includes a clean Control Panel uninstaller.
 
 ### Option 2: Portable Zip
-- **[Download Release.zip](https://github.com/mzguardit/aurelia/releases/download/v1.0.0/Release.zip)**
+- **[Download Release.zip](https://github.com/mzguardit/aurelia/releases/download/v1.0.1/Release.zip)**
   - Extract anywhere and run `aurelia.exe` as Administrator. Zero installation required.
 
 > **Note**: Administrator privileges are required exclusively to initialize the Wintun kernel driver and arm the WFP firewall kill switch.
