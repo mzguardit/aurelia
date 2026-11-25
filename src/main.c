@@ -2649,24 +2649,14 @@ static void paint_dc(HDC dc, int w, int h) {
             wcscpy_s(attest_str, _countof(attest_str),
                 g_vpn_active ? LTXT(L"Tunnel cifrato attivo · Kill switch fail-closed armato", L"Encrypted tunnel active · Fail-closed kill switch armed") : g_tor_info);
         }
-        text(dc, 60, 264, attest_str, muted, g_small);
-        chip(dc, 60, 288, 136, 30, LTXT(L"VPN DI SISTEMA", L"SYSTEM VPN"), teal, pale_blue);
-        if(g_setting_turbo_boost) {
-            chip(dc, 204, 288, 126, 30, LTXT(L"TURBO BOOST", L"TURBO BOOST"), RGB(217, 140, 30), RGB(255, 246, 228));
-        }
-        if(g_setting_fake_ip) {
-            chip(dc, 338, 288, 126, 30, LTXT(L"FAKE-IP POOL", L"FAKE-IP POOL"), teal, pale_blue);
-        }
-        if(g_setting_stealth_mode) {
-            chip(dc, 472, 288, 136, 30, LTXT(L"STEALTH SHIELD", L"STEALTH SHIELD"), green, pale_green);
-        }
+        text(dc, 60, 268, attest_str, muted, g_small);
 
-        text(dc, 60, 336, LTXT(L"IP PUBBLICO TOR", L"TOR EXIT IP"), muted, g_caption);
-        text(dc, 60, 358, g_vpn_active ? g_exit_public_ip : L"—", white, g_font_bold ? g_font_bold : g_font);
+        text(dc, 60, 320, LTXT(L"IP PUBBLICO TOR", L"TOR EXIT IP"), muted, g_caption);
+        text(dc, 60, 344, g_vpn_active ? g_exit_public_ip : L"—", white, g_font_bold ? g_font_bold : g_font);
 
-        text(dc, 318, 336, LTXT(L"PAESE DI USCITA EFFETTIVO", L"ACTUAL EXIT COUNTRY"), muted, g_caption);
-        draw_flag_code(dc, 318, 354, g_exit_public_country);
-        text(dc, 358, 358, g_vpn_active ? country_name(g_exit_public_country) : L"—", white, g_font_bold ? g_font_bold : g_font);
+        text(dc, 318, 320, LTXT(L"PAESE DI USCITA EFFETTIVO", L"ACTUAL EXIT COUNTRY"), muted, g_caption);
+        draw_flag_code(dc, 318, 338, g_exit_public_country);
+        text(dc, 358, 344, g_vpn_active ? country_name(g_exit_public_country) : L"—", white, g_font_bold ? g_font_bold : g_font);
 
         draw_shield(dc, 644, 290);
 
@@ -3078,7 +3068,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HFONT old = (HFONT)SelectObject(dc, g_font_bold ? g_font_bold : g_font);
             wchar_t s[64];
             GetWindowTextW(d->hwndItem, s, 64);
-            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
             return TRUE;
         }
@@ -3101,7 +3091,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HFONT old = (HFONT)SelectObject(dc, g_font);
             wchar_t s[64];
             GetWindowTextW(d->hwndItem, s, 64);
-            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
             return TRUE;
         }
@@ -3123,7 +3113,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HFONT old = (HFONT)SelectObject(dc, g_font);
             wchar_t s[64];
             GetWindowTextW(d->hwndItem, s, 64);
-            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
             return TRUE;
         }
@@ -3137,7 +3127,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HFONT old = (HFONT)SelectObject(dc, g_font_bold ? g_font_bold : g_font);
             wchar_t s[64];
             GetWindowTextW(d->hwndItem, s, 64);
-            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
             return TRUE;
         }
