@@ -18,7 +18,7 @@
 
 <br/>
 
-<img src="docs/screenshot.png" alt="Aurelia Interface Screenshot" width="880" />
+<img src="https://github.com/mzguardit/aurelia/blob/main/AURELIA_VPN%20_TOR.png?raw=true" alt="Aurelia Interface Screenshot" width="880" />
 
 </div>
 
