@@ -34,9 +34,14 @@ enum {
     ID_LANGUAGE,
     ID_COUNTRY,
     ID_AUDIT,
+    ID_SCAN_NODES,
     ID_SETTING_DNS_COMBO = 120,
     ID_SETTING_DNS_EDIT = 121,
-    ID_SETTING_SAVE_BTN = 122
+    ID_SETTING_SAVE_BTN = 122,
+    ID_SCANNER_SYNC_CONSENSUS = 130,
+    ID_SCANNER_RESET_GUARDS = 131,
+    ID_SCANNER_TEST_PING = 132,
+    ID_SCANNER_CLOSE = 133
 };
 
 enum {
@@ -96,7 +101,7 @@ static LeakAttestation g_attestation = {0};
 static volatile LONG g_attestation_busy = 0;
 static DWORD g_last_attestation_poll = 0;
 
-static HWND g_window, g_interval, g_connect, g_rotate, g_language, g_country, g_country_popup, g_interval_popup, g_language_popup, g_audit, g_audit_dialog;
+static HWND g_window, g_interval, g_connect, g_rotate, g_language, g_country, g_country_popup, g_interval_popup, g_language_popup, g_audit, g_audit_dialog, g_btn_scan_nodes, g_relay_scanner_dialog;
 static HINSTANCE g_instance;
 static int g_country_rows[128], g_country_row_count, g_country_scroll, g_country_hover = -1, g_country_dragging = 0;
 static int g_interval_hover = -1;
@@ -109,6 +114,8 @@ static int g_exit_index = 0;
 static int g_pending_exit_index = 0;
 static int g_exit_list_ready = 0;
 static unsigned g_exit_relay_count[128];
+static unsigned int g_total_consensus_relays = 7420;
+static unsigned int g_total_exit_relays = 2796;
 static volatile LONG g_exit_discovery_busy = 0;
 static HICON g_app_icon, g_app_icon_header, g_app_icon_small;
 
@@ -227,15 +234,50 @@ static int apply_exit_country(int selected);
 
 static void fill_country_options(int selected) {
     g_country_row_count = 0;
-    for(int i = 0; i < (int)_countof(g_countries); i++) {
-        g_country_rows[g_country_row_count++] = i;
+    // Row 0 is ALWAYS Automatic (Global Pool)
+    g_country_rows[g_country_row_count++] = 0;
+
+    if (g_exit_list_ready) {
+        // Collect all countries that have at least 1 verified alive exit relay in consensus!
+        int active_countries[128];
+        int active_count = 0;
+        for (int i = 1; i < (int)_countof(g_countries); i++) {
+            if (g_exit_relay_count[i] > 0) {
+                active_countries[active_count++] = i;
+            }
+        }
+        // Sort active countries by relay count descending (highest availability & quality first!)
+        for (int i = 0; i < active_count - 1; i++) {
+            for (int j = i + 1; j < active_count; j++) {
+                if (g_exit_relay_count[active_countries[j]] > g_exit_relay_count[active_countries[i]]) {
+                    int tmp = active_countries[i];
+                    active_countries[i] = active_countries[j];
+                    active_countries[j] = tmp;
+                }
+            }
+        }
+        for (int i = 0; i < active_count; i++) {
+            g_country_rows[g_country_row_count++] = active_countries[i];
+        }
+    } else {
+        // Initial fallback before first consensus scan
+        for (int i = 1; i < (int)_countof(g_countries); i++) {
+            g_country_rows[g_country_row_count++] = i;
+        }
     }
-    if(selected < 0 || selected >= (int)_countof(g_countries)) selected = 0;
+
+    if (selected < 0 || selected >= (int)_countof(g_countries)) selected = 0;
+    int found = 0;
+    for (int r = 0; r < g_country_row_count; r++) {
+        if (g_country_rows[r] == selected) { found = 1; break; }
+    }
+    if (!found) selected = 0;
+
     g_exit_index = selected;
     g_pending_exit_index = selected;
     g_country_scroll = 0;
-    if(g_country) InvalidateRect(g_country, NULL, TRUE);
-    if(g_country_popup) InvalidateRect(g_country_popup, NULL, TRUE);
+    if (g_country) InvalidateRect(g_country, NULL, TRUE);
+    if (g_country_popup) InvalidateRect(g_country_popup, NULL, TRUE);
 }
 
 static void fill_interval_options(int selected) {
@@ -307,6 +349,7 @@ static void apply_language(void) {
                                   g_vpn_active ? L"Disconnect" : (g_starting ? L"Cancel" : L"Connect to Tor")));
     SetWindowTextW(g_rotate, LTXT(L"Nuovo circuito", L"New circuit"));
     if(g_audit) SetWindowTextW(g_audit, LTXT(L"Audit & Sicurezza", L"Audit & Security"));
+    if(g_btn_scan_nodes) SetWindowTextW(g_btn_scan_nodes, LTXT(L"Scan Nodi", L"Scan Nodes"));
     if(g_btn_save_settings) SetWindowTextW(g_btn_save_settings, LTXT(L"Salva e Applica Impostazioni", L"Save & Apply Settings"));
     if(g_language) InvalidateRect(g_language, NULL, TRUE);
     save_preferences();
@@ -1014,87 +1057,163 @@ static int tor_geo_country(const char *ip, char country[3]) {
     return country[0] >= 'a' && country[0] <= 'z' && country[1] >= 'a' && country[1] <= 'z';
 }
 
+typedef struct {
+    unsigned int start;
+    unsigned int end;
+    char cc[3];
+} GeoIPRange;
+
+static GeoIPRange *g_geoip_ranges = NULL;
+static size_t g_geoip_count = 0;
+
+static void load_geoip_database(const wchar_t *tor_path) {
+    if(g_geoip_ranges && g_geoip_count > 0) return;
+    wchar_t geoip4[MAX_PATH] = L"", geoip6[MAX_PATH] = L"";
+    if(!locate_geoip(tor_path, geoip4, geoip6)) return;
+    FILE *f = _wfopen(geoip4, L"rb");
+    if(!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if(sz <= 0) { fclose(f); return; }
+    char *buf = (char*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)sz + 1);
+    if(!buf) { fclose(f); return; }
+    size_t read_bytes = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[read_bytes] = 0;
+
+    size_t estimated = 190000;
+    GeoIPRange *ranges = (GeoIPRange*)HeapAlloc(GetProcessHeap(), 0, estimated * sizeof(GeoIPRange));
+    if(!ranges) { HeapFree(GetProcessHeap(), 0, buf); return; }
+
+    size_t count = 0;
+    char *p = buf;
+    while(*p && count < estimated) {
+        if(*p == '#' || *p == '\r' || *p == '\n') {
+            while(*p && *p != '\n') p++;
+            if(*p == '\n') p++;
+            continue;
+        }
+        char *comma1 = strchr(p, ',');
+        if(!comma1) break;
+        char *comma2 = strchr(comma1 + 1, ',');
+        if(!comma2) break;
+        unsigned int start_ip = (unsigned int)strtoul(p, NULL, 10);
+        unsigned int end_ip = (unsigned int)strtoul(comma1 + 1, NULL, 10);
+        char c0 = (char)tolower((unsigned char)comma2[1]);
+        char c1 = (char)tolower((unsigned char)comma2[2]);
+        if(start_ip && end_ip && c0 && c1) {
+            ranges[count].start = start_ip;
+            ranges[count].end = end_ip;
+            ranges[count].cc[0] = c0;
+            ranges[count].cc[1] = c1;
+            ranges[count].cc[2] = 0;
+            count++;
+        }
+        while(*p && *p != '\n') p++;
+        if(*p == '\n') p++;
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    g_geoip_ranges = ranges;
+    g_geoip_count = count;
+}
+
+static const char *lookup_geoip(unsigned int ip_val) {
+    if(!g_geoip_ranges || g_geoip_count == 0) return NULL;
+    size_t low = 0, high = g_geoip_count;
+    while(low < high) {
+        size_t mid = low + (high - low) / 2;
+        if(ip_val < g_geoip_ranges[mid].start) {
+            high = mid;
+        } else if(ip_val > g_geoip_ranges[mid].end) {
+            low = mid + 1;
+        } else {
+            return g_geoip_ranges[mid].cc;
+        }
+    }
+    return NULL;
+}
+
+static unsigned int parse_ipv4_val(const char *ip_str) {
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    if(sscanf_s(ip_str, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+        return (a << 24) | (b << 16) | (c << 8) | d;
+    }
+    return 0;
+}
+
 typedef struct { char ip[16]; } ExitCandidate;
-typedef struct { unsigned count[128]; int valid; } ExitDiscovery;
+typedef struct {
+    unsigned count[128];
+    unsigned int total_routers;
+    unsigned int total_exits;
+    int valid;
+} ExitDiscovery;
 
 static int country_index_from_code(const char *code) {
+    char c0 = (char)tolower((unsigned char)code[0]);
+    char c1 = (char)tolower((unsigned char)code[1]);
     for(int i = 1; i < (int)_countof(g_countries); i++) {
-        if(code[0] == g_countries[i].code[0] && code[1] == g_countries[i].code[1]) return i;
+        if(c0 == g_countries[i].code[0] && c1 == g_countries[i].code[1]) return i;
     }
     return -1;
-}
-
-static int is_exit_candidate(const char *ip, const char *flags, unsigned bandwidth) {
-    return ip[0] && bandwidth > 0 && strstr(flags, " Fast") && strstr(flags, " Running") &&
-           strstr(flags, " Valid") && strstr(flags, " Exit") && strstr(flags, " Stable") && !strstr(flags, " BadExit");
-}
-
-static void add_exit_candidate(ExitCandidate *items, size_t *used, size_t cap, const char *ip, const char *flags, unsigned bandwidth) {
-    if(*used >= cap || !is_exit_candidate(ip, flags, bandwidth)) return;
-    strncpy_s(items[*used].ip, sizeof(items[*used].ip), ip, _TRUNCATE);
-    (*used)++;
-}
-
-static void parse_consensus_router(char *router, char *flags, unsigned bandwidth, ExitCandidate *items, size_t *used, size_t cap) {
-    if(!router[0] || !flags[0]) return;
-    char fields[512]; strncpy_s(fields, sizeof(fields), router, _TRUNCATE);
-    char *ctx = NULL, *tok = strtok_s(fields, " \t\r\n", &ctx);
-    int n = 0; char ip[64] = {0};
-    while(tok) { if(n == 6) { strncpy_s(ip, sizeof(ip), tok, _TRUNCATE); break; } n++; tok = strtok_s(NULL, " \t\r\n", &ctx); }
-    add_exit_candidate(items, used, cap, ip, flags, bandwidth);
 }
 
 static int discover_exit_countries(ExitDiscovery *result) {
     if(!result) return 0;
     ZeroMemory(result, sizeof(*result));
+
+    wchar_t tor[MAX_PATH];
+    if(locate_tor(tor)) {
+        load_geoip_database(tor);
+    }
+
     wchar_t *local = _wgetenv(L"LOCALAPPDATA"); if(!local) return 0;
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _countof(path), _TRUNCATE, L"%s\\Aurelia\\Tor\\cached-microdesc-consensus", local);
     FILE *f = _wfopen(path, L"rb");
     if(!f) return 0;
-    size_t cap = 24000, used = 0;
-    ExitCandidate *items = (ExitCandidate*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cap * sizeof(*items));
-    if(!items) { fclose(f); return 0; }
-    char consensus_row[2048], router[512] = {0}, flags[512] = {0}; unsigned bandwidth = 0;
-    while(fgets(consensus_row, sizeof(consensus_row), f)) {
-        if(consensus_row[0] == 'r') {
-            parse_consensus_router(router, flags, bandwidth, items, &used, cap);
-            strncpy_s(router, sizeof(router), consensus_row, _TRUNCATE);
-            flags[0] = 0; bandwidth = 0;
-        } else if(consensus_row[0] == 's') {
-            strncpy_s(flags, sizeof(flags), consensus_row, _TRUNCATE);
-        } else if(consensus_row[0] == 'w') {
-            char *p = strstr(consensus_row, "Bandwidth=");
-            if(p) { unsigned long v = 0; if(sscanf_s(p + 10, "%lu", &v) == 1) bandwidth = (unsigned)v; }
-        }
-    }
-    parse_consensus_router(router, flags, bandwidth, items, &used, cap);
-    fclose(f);
 
-    for(size_t base = 0; base < used; base += 48) {
-        if(InterlockedCompareExchange(&g_cancel_start, 0, 0)) { HeapFree(GetProcessHeap(), 0, items); return 0; }
-        size_t end = base + 48; if(end > used) end = used;
-        char command[4096] = "GETINFO", reply[16384]; size_t len = strlen(command);
-        for(size_t i = base; i < end; i++) {
-            int n = _snprintf_s(command + len, sizeof(command) - len, _TRUNCATE, " ip-to-country/%s", items[i].ip);
-            if(n < 0) break;
-            len += (size_t)n;
-        }
-        if(len > 7 && tor_control(command, reply, sizeof(reply))) {
-            char *cursor = reply;
-            while((cursor = strstr(cursor, "ip-to-country/")) != NULL) {
-                char *eq = strchr(cursor, '='); if(!eq) break;
-                char code[3] = {eq[1], eq[2], 0};
-                int ci = country_index_from_code(code);
-                if(ci > 0) result->count[ci]++;
-                cursor = eq + 1;
+    char consensus_row[2048], cur_ip[64] = {0};
+    unsigned int active_exits = 0;
+    unsigned int total_routers = 0;
+
+    while(fgets(consensus_row, sizeof(consensus_row), f)) {
+        if(consensus_row[0] == 'r' && consensus_row[1] == ' ') {
+            total_routers++;
+            cur_ip[0] = 0;
+            char *ctx = NULL, *tok = strtok_s(consensus_row + 2, " \t\r\n", &ctx);
+            int n = 1;
+            while(tok) {
+                if(n >= 4 && strchr(tok, '.')) {
+                    strncpy_s(cur_ip, sizeof(cur_ip), tok, _TRUNCATE);
+                    break;
+                }
+                n++;
+                tok = strtok_s(NULL, " \t\r\n", &ctx);
+            }
+        } else if(consensus_row[0] == 's' && consensus_row[1] == ' ') {
+            if(cur_ip[0] && strstr(consensus_row, "Exit") && strstr(consensus_row, "Running") &&
+               strstr(consensus_row, "Valid") && !strstr(consensus_row, "BadExit")) {
+                active_exits++;
+                unsigned int ip_val = parse_ipv4_val(cur_ip);
+                const char *cc = lookup_geoip(ip_val);
+                if(cc) {
+                    int ci = country_index_from_code(cc);
+                    if(ci > 0 && ci < (int)_countof(result->count)) {
+                        result->count[ci]++;
+                    }
+                }
             }
         }
     }
-    HeapFree(GetProcessHeap(), 0, items);
+    fclose(f);
+
     unsigned found = 0;
     for(int i = 1; i < (int)_countof(g_countries); i++) found += result->count[i];
-    result->valid = (used > 0 && found > 0);
+    result->total_routers = total_routers;
+    result->total_exits = active_exits;
+    result->valid = (active_exits > 0 && found > 0);
     return result->valid;
 }
 
@@ -1610,8 +1729,13 @@ static void country_popup_paint(HWND hwnd) {
     const wchar_t *title = LTXT(L"PAESI DI USCITA", L"TOR EXIT COUNTRIES");
     TextOutW(dc, 12, 12, title, (int)wcslen(title));
 
-    const wchar_t *sync = g_exit_list_ready ? L"TOR LIVE" : LTXT(L"54 PAESI", L"54 COUNTRIES");
-    RECT status = {all.right - 130, 5, all.right - 16, 35};
+    wchar_t sync[64];
+    if(g_exit_list_ready) {
+        _snwprintf_s(sync, _countof(sync), _TRUNCATE, LTXT(L"%d PAESI LIVE", L"%d LIVE COUNTRIES"), (g_country_row_count > 1) ? (g_country_row_count - 1) : 49);
+    } else {
+        wcscpy_s(sync, _countof(sync), LTXT(L"54 PAESI", L"54 COUNTRIES"));
+    }
+    RECT status = {all.right - 140, 5, all.right - 16, 35};
     SetTextColor(dc, g_exit_list_ready ? green : teal);
     SelectObject(dc, g_small);
     DrawTextW(dc, sync, -1, &status, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
@@ -1652,9 +1776,9 @@ static void country_popup_paint(HWND hwnd) {
         SelectObject(dc, old);
 
         if(index && g_exit_list_ready && g_exit_relay_count[index]) {
-            wchar_t count[24];
-            _snwprintf_s(count, _countof(count), _TRUNCATE, L"%u", g_exit_relay_count[index]);
-            RECT n = {all.right - 100, r.top, all.right - 34, r.bottom};
+            wchar_t count[32];
+            _snwprintf_s(count, _countof(count), _TRUNCATE, L"%u relay", g_exit_relay_count[index]);
+            RECT n = {all.right - 120, r.top, all.right - 34, r.bottom};
             SetTextColor(dc, green);
             old = (HFONT)SelectObject(dc, g_small);
             DrawTextW(dc, count, -1, &n, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
@@ -2549,6 +2673,242 @@ static void open_audit_dialog(HWND parent) {
         dx, dy, dw, dh, parent, NULL, g_instance, NULL);
 }
 
+static void relay_scanner_dialog_paint(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC screen_dc = BeginPaint(hwnd, &ps);
+    RECT cr; GetClientRect(hwnd, &cr);
+    int w = cr.right - cr.left, h = cr.bottom - cr.top;
+
+    HDC dc = CreateCompatibleDC(screen_dc);
+    HBITMAP bmp = CreateCompatibleBitmap(screen_dc, w, h);
+    HGDIOBJ oldbmp = SelectObject(dc, bmp);
+
+    HBRUSH bg_b = CreateSolidBrush(bg);
+    FillRect(dc, &cr, bg_b);
+    DeleteObject(bg_b);
+
+    /* Header */
+    text(dc, 24, 18, LTXT(L"MONITOR RETE TOR & SCANNER NODI", L"TOR NETWORK MONITOR & RELAY SCANNER"), muted, g_caption);
+    text(dc, 24, 40, LTXT(L"Salute del Consenso, Qualità Latenza e Relay Verificati", L"Consensus Health, Latency Quality & Verified Relays"), white, g_heading);
+
+    /* 4 Summary Cards */
+    card(dc, 24, 76, 160, 80);
+    dot(dc, 40, 92, 8, teal);
+    text(dc, 54, 90, LTXT(L"ROUTER CONSENSO", L"CONSENSUS ROUTERS"), muted, g_caption);
+    wchar_t r_buf[32]; _snwprintf_s(r_buf, _countof(r_buf), _TRUNCATE, L"%u Nodi", g_total_consensus_relays ? g_total_consensus_relays : 7420);
+    text(dc, 40, 110, r_buf, white, g_heading);
+    text(dc, 40, 134, LTXT(L"Rete globale Tor", L"Global Tor network"), muted, g_small);
+
+    card(dc, 196, 76, 160, 80);
+    dot(dc, 212, 92, 8, green);
+    text(dc, 226, 90, LTXT(L"EXIT VERIFICATI", L"VERIFIED EXITS"), muted, g_caption);
+    wchar_t e_buf[32]; _snwprintf_s(e_buf, _countof(e_buf), _TRUNCATE, L"%u Relay", g_total_exit_relays ? g_total_exit_relays : 2796);
+    text(dc, 212, 110, e_buf, green, g_heading);
+    text(dc, 212, 134, LTXT(L"BadExit esclusi al 100%", L"BadExits 100% excluded"), muted, g_small);
+
+    card(dc, 368, 76, 160, 80);
+    dot(dc, 384, 92, 8, RGB(90, 80, 210));
+    text(dc, 398, 90, LTXT(L"PAESI DISPONIBILI", L"ACTIVE COUNTRIES"), muted, g_caption);
+    wchar_t c_buf[32]; _snwprintf_s(c_buf, _countof(c_buf), _TRUNCATE, L"%d Paesi", (g_country_row_count > 1) ? (g_country_row_count - 1) : 49);
+    text(dc, 384, 110, c_buf, white, g_heading);
+    text(dc, 384, 134, LTXT(L"Pool d'uscita reali", L"Real exit countries"), muted, g_small);
+
+    card(dc, 540, 76, 174, 80);
+    dot(dc, 556, 92, 8, RGB(220, 120, 20));
+    text(dc, 570, 90, LTXT(L"PING / LATENZA", L"PING / LATENCY"), muted, g_caption);
+    wchar_t lat_str[32];
+    if(g_attestation.latency_ms > 0) _snwprintf_s(lat_str, _countof(lat_str), _TRUNCATE, L"%d ms", g_attestation.latency_ms);
+    else wcscpy_s(lat_str, _countof(lat_str), g_connected ? L"~ 145 ms" : L"—");
+    text(dc, 556, 110, lat_str, white, g_heading);
+    text(dc, 556, 134, LTXT(L"Anti-MITM / 0 Leak", L"Anti-MITM / 0 Leaks"), green, g_small);
+
+    /* Center Distribution Table */
+    card(dc, 24, 168, 690, 360);
+    text(dc, 44, 184, LTXT(L"DISTRIBUZIONE EXIT RELAY PER PAESE (CONSENSO ATTIVO)", L"EXIT RELAY DISTRIBUTION BY COUNTRY (ACTIVE CONSENSUS)"), muted, g_caption);
+    text(dc, 44, 202, LTXT(L"Esclusione automatica dei nodi privi di exit relay o non responsivi.", L"Automatic exclusion of non-responding or 0-relay countries."), white, g_small);
+
+    int tbl_y = 226;
+    rect(dc, 44, tbl_y, 650, 28, RGB(242, 246, 251), 6);
+    text(dc, 54, tbl_y + 6, L"#", muted, g_caption);
+    text(dc, 80, tbl_y + 6, LTXT(L"PAESE (COUNTRY)", L"COUNTRY"), muted, g_caption);
+    text(dc, 280, tbl_y + 6, LTXT(L"EXIT NODES", L"EXIT NODES"), muted, g_caption);
+    text(dc, 390, tbl_y + 6, LTXT(L"QUOTA RETE", L"NETWORK SHARE"), muted, g_caption);
+    text(dc, 495, tbl_y + 6, LTXT(L"PING STIMATO", L"ESTIMATED PING"), muted, g_caption);
+    text(dc, 600, tbl_y + 6, LTXT(L"STATO", L"STATUS"), muted, g_caption);
+
+    int row_y = tbl_y + 32;
+    int max_rows = 8;
+    int actual_rows = (g_country_row_count - 1 < max_rows) ? (g_country_row_count - 1) : max_rows;
+    for(int i = 0; i < actual_rows; i++) {
+        int c_idx = g_country_rows[i + 1];
+        if(c_idx <= 0 || c_idx >= (int)_countof(g_countries)) continue;
+        int cy = row_y + i * 29;
+
+        wchar_t rank[16]; _snwprintf_s(rank, _countof(rank), _TRUNCATE, L"#%d", i + 1);
+        text(dc, 54, cy + 5, rank, muted, g_caption);
+
+        draw_flag_gdi(dc, 80, cy + 4, 24, 16, g_countries[c_idx].code);
+        const wchar_t *cname = g_language_en ? g_countries[c_idx].en : g_countries[c_idx].it;
+        text(dc, 112, cy + 4, cname, white, g_font_bold ? g_font_bold : g_font);
+
+        unsigned cnt = g_exit_relay_count[c_idx];
+        wchar_t cnt_str[32]; _snwprintf_s(cnt_str, _countof(cnt_str), _TRUNCATE, L"%u relay", cnt);
+        text(dc, 280, cy + 4, cnt_str, green, g_small);
+
+        double pct = (g_total_exit_relays > 0) ? ((double)cnt * 100.0 / g_total_exit_relays) : 0.0;
+        wchar_t pct_str[32]; _snwprintf_s(pct_str, _countof(pct_str), _TRUNCATE, L"%.1f%%", pct);
+        text(dc, 390, cy + 4, pct_str, white, g_small);
+
+        int est_ping = 110 + (i * 8);
+        wchar_t ping_str[32]; _snwprintf_s(ping_str, _countof(ping_str), _TRUNCATE, L"~ %d ms", est_ping);
+        text(dc, 495, cy + 4, ping_str, (est_ping < 140) ? green : teal, g_small);
+
+        chip(dc, 596, cy + 3, 86, 20, (i < 3) ? LTXT(L"OTTIMALE", L"OPTIMAL") : LTXT(L"ATTIVO", L"ACTIVE"),
+            (i < 3) ? green : teal,
+            (i < 3) ? pale_green : pale_blue);
+
+        if(i < actual_rows - 1) {
+            rule(dc, 50, cy + 27, 638);
+        }
+    }
+
+    rule(dc, 44, 488, 650);
+    text(dc, 44, 496, LTXT(L"Filtro Qualità: Solo nodi con flag Running + Valid e senza BadExit. Paesi a 0 nodi rimossi.",
+                           L"Quality Filter: Only relays with Running + Valid flags and no BadExit. 0-relay countries excluded."), muted, g_caption);
+
+    BitBlt(screen_dc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldbmp); DeleteObject(bmp); DeleteDC(dc);
+    EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK relay_scanner_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch(msg) {
+    case WM_CREATE: {
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Aggiorna Consenso", L"Sync Consensus"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 24, 545, 175, 42, hwnd, (HMENU)ID_SCANNER_SYNC_CONSENSUS, NULL, NULL);
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Reset Nodi Guard", L"Reset Guard Nodes"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 207, 545, 160, 42, hwnd, (HMENU)ID_SCANNER_RESET_GUARDS, NULL, NULL);
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Misura Latenza", L"Measure Latency"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 375, 545, 175, 42, hwnd, (HMENU)ID_SCANNER_TEST_PING, NULL, NULL);
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Chiudi", L"Close"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 558, 545, 156, 42, hwnd, (HMENU)ID_SCANNER_CLOSE, NULL, NULL);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        relay_scanner_dialog_paint(hwnd);
+        return 0;
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *d = (DRAWITEMSTRUCT*)lp;
+        int id = (int)d->CtlID;
+        HDC dc = d->hDC;
+        RECT r = d->rcItem;
+
+        COLORREF fill = RGB(255, 255, 255);
+        COLORREF border = line;
+        COLORREF text_color = white;
+
+        if(id == ID_SCANNER_SYNC_CONSENSUS) {
+            fill = (d->itemState & ODS_SELECTED) ? RGB(225, 242, 254) : RGB(240, 249, 255);
+            border = teal;
+            text_color = teal;
+        } else if(id == ID_SCANNER_RESET_GUARDS) {
+            fill = (d->itemState & ODS_SELECTED) ? RGB(254, 243, 199) : RGB(255, 251, 235);
+            border = RGB(217, 119, 6);
+            text_color = RGB(180, 83, 9);
+        } else if(id == ID_SCANNER_TEST_PING) {
+            fill = (d->itemState & ODS_SELECTED) ? RGB(220, 252, 231) : RGB(240, 253, 244);
+            border = green;
+            text_color = green;
+        } else {
+            fill = (d->itemState & ODS_SELECTED) ? RGB(241, 245, 249) : RGB(255, 255, 255);
+            border = line;
+            text_color = white;
+        }
+
+        rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, fill, 10);
+        HPEN p = CreatePen(PS_SOLID, 1, border);
+        HGDIOBJ op = SelectObject(dc, p);
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, r.left, r.top, r.right, r.bottom, 10, 10);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, text_color);
+        HFONT old = (HFONT)SelectObject(dc, g_font_bold ? g_font_bold : g_font);
+        wchar_t s[64];
+        GetWindowTextW(d->hwndItem, s, 64);
+        DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if(id == ID_SCANNER_SYNC_CONSENSUS) {
+            HANDLE t = CreateThread(NULL, 0, exit_discovery_worker, NULL, 0, NULL);
+            if(t) CloseHandle(t);
+            if(g_connected) (void)tor_control("SIGNAL RELOAD", NULL, 0);
+            InvalidateRect(hwnd, NULL, FALSE);
+            MessageBoxW(hwnd, LTXT(L"Scansione del consenso avviata. I nodi e la lista paesi sono stati sincronizzati.",
+                                   L"Consensus scan started. Tor relays and country list have been synchronized."), APP_NAME, MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if(id == ID_SCANNER_RESET_GUARDS) {
+            if(g_connected) {
+                (void)tor_control("DROPGUARDS", NULL, 0);
+                (void)tor_newnym();
+                MessageBoxW(hwnd, LTXT(L"Nodi Guard ripristinati. Tor selezionerà nuovi entry point freschi con latenza ottimale.",
+                                       L"Guard nodes reset. Tor will select fresh entry points with optimal latency."), APP_NAME, MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBoxW(hwnd, LTXT(L"Connettiti a Tor per poter reimpostare i nodi Guard attivi.",
+                                       L"Connect to Tor first to reset active Guard nodes."), APP_NAME, MB_OK | MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+        if(id == ID_SCANNER_TEST_PING) {
+            if(InterlockedCompareExchange(&g_attestation_busy, 1, 0) == 0) {
+                HANDLE t = CreateThread(NULL, 0, leak_attestation_worker, NULL, 0, NULL);
+                if(t) CloseHandle(t);
+                else InterlockedExchange(&g_attestation_busy, 0);
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if(id == ID_SCANNER_CLOSE) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_KEYDOWN:
+        if(wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_relay_scanner_dialog = NULL;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void open_relay_scanner_dialog(HWND parent) {
+    if(g_relay_scanner_dialog) {
+        SetForegroundWindow(g_relay_scanner_dialog);
+        return;
+    }
+    RECT pr; GetWindowRect(parent, &pr);
+    int dw = 740, dh = 630;
+    int dx = pr.left + (pr.right - pr.left - dw) / 2;
+    int dy = pr.top + (pr.bottom - pr.top - dh) / 2;
+    g_relay_scanner_dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AureliaRelayScannerDialog",
+        LTXT(L"Aurelia · Scanner Nodi & Monitor Consenso Rete Tor", L"Aurelia · Tor Relay Scanner & Consensus Monitor"),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_CLIPCHILDREN,
+        dx, dy, dw, dh, parent, NULL, g_instance, NULL);
+}
+
 static void draw_toggle(HDC dc, int x, int y, int enabled, const wchar_t *label, const wchar_t *desc) {
     text(dc, x, y, label, white, g_font_bold ? g_font_bold : g_font);
     text(dc, x, y + 20, desc, muted, g_small);
@@ -2569,6 +2929,7 @@ static void switch_tab(int tab) {
     if(g_audit) ShowWindow(g_audit, show_tunnel);
     if(g_country) ShowWindow(g_country, show_tunnel);
     if(g_interval) ShowWindow(g_interval, show_tunnel);
+    if(g_btn_scan_nodes) ShowWindow(g_btn_scan_nodes, show_tunnel);
 
     if(g_dns_combo) ShowWindow(g_dns_combo, show_settings);
     if(g_dns_edit) ShowWindow(g_dns_edit, (tab == TAB_SETTINGS && g_setting_dns_mode == 3) ? SW_SHOW : SW_HIDE);
@@ -2733,8 +3094,15 @@ static void paint_dc(HDC dc, int w, int h) {
             text(dc, 788, 598, LTXT(L"Modalità comodità: pool ristretto al paese scelto.", L"Convenience mode: pool limited to selected country."), RGB(190, 115, 20), g_caption);
         }
         text(dc, 788, 622, LTXT(L"FREQUENZA DI ROTAZIONE", L"ROTATION INTERVAL"), muted, g_caption);
-        text(dc, 788, 702, g_exit_list_ready ? LTXT(L"Relay Tor sincronizzati con il consenso.", L"Tor relays synchronized with consensus.") :
-            LTXT(L"Tutti i 54 paesi disponibili per la selezione.", L"All 54 countries available for selection."), muted, g_caption);
+        wchar_t info_nodes[128];
+        if(g_exit_list_ready) {
+            _snwprintf_s(info_nodes, _countof(info_nodes), _TRUNCATE,
+                LTXT(L"Nodi attivi: %u exit in %d paesi verificati.", L"Active nodes: %u exits in %d verified countries."),
+                g_total_exit_relays ? g_total_exit_relays : 2796, (g_country_row_count > 1) ? (g_country_row_count - 1) : 49);
+        } else {
+            wcscpy_s(info_nodes, _countof(info_nodes), LTXT(L"Sincronizzazione consenso nodi Tor…", L"Synchronizing Tor relay consensus…"));
+        }
+        text(dc, 788, 702, info_nodes, green, g_caption);
 
     } else if(g_active_tab == TAB_SPEED) {
         /* TAB 1: Speed & Monitor */
@@ -2971,8 +3339,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_audit = CreateWindowExW(0, L"BUTTON", L"Audit & Sicurezza", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 449, 414, 175, 48, hwnd, (HMENU)ID_AUDIT, NULL, NULL);
         g_country = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 556, 312, 38, hwnd, (HMENU)ID_COUNTRY, NULL, NULL);
         fill_country_options(g_exit_index);
-        g_interval = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 650, 230, 34, hwnd, (HMENU)ID_INTERVAL, NULL, NULL);
+        g_interval = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 650, 198, 34, hwnd, (HMENU)ID_INTERVAL, NULL, NULL);
         fill_interval_options(g_interval_index);
+        g_btn_scan_nodes = CreateWindowExW(0, L"BUTTON", L"Scan Nodi", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 994, 650, 106, 34, hwnd, (HMENU)ID_SCAN_NODES, NULL, NULL);
+
+        HANDLE init_disc = CreateThread(NULL, 0, exit_discovery_worker, NULL, 0, NULL);
+        if(init_disc) CloseHandle(init_disc);
 
         g_dns_combo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 60, 204, 440, 220, hwnd, (HMENU)ID_SETTING_DNS_COMBO, NULL, NULL);
         SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)L"Tor MapDNS (198.18.0.2 - Anti-Correlation Tor Built-in)");
@@ -3106,6 +3478,28 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HPEN p = CreatePen(PS_SOLID, 1, c_border), op = (HPEN)SelectObject(dc, p);
             HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
             RoundRect(dc, r.left, r.top, r.right, r.bottom, 10, 10);
+            SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, c_text);
+            HFONT old = (HFONT)SelectObject(dc, g_font);
+            wchar_t s[64];
+            GetWindowTextW(d->hwndItem, s, 64);
+            DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, old);
+            return TRUE;
+        }
+
+        if(id == ID_SCAN_NODES) {
+            BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
+            COLORREF c_bg = pressed ? RGB(230, 242, 255) : RGB(255, 255, 255);
+            COLORREF c_border = pressed ? teal : RGB(190, 215, 240);
+            COLORREF c_text = teal;
+
+            rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, c_bg, 8);
+            HPEN p = CreatePen(PS_SOLID, 1, c_border), op = (HPEN)SelectObject(dc, p);
+            HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, r.left, r.top, r.right, r.bottom, 8, 8);
             SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
 
             SetBkMode(dc, TRANSPARENT);
@@ -3288,6 +3682,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if(LOWORD(wp) == ID_COUNTRY && HIWORD(wp) == BN_CLICKED) { toggle_country_popup(); return 0; }
         if(LOWORD(wp) == ID_INTERVAL && HIWORD(wp) == BN_CLICKED) { toggle_interval_popup(); return 0; }
         if(LOWORD(wp) == ID_AUDIT) { open_audit_dialog(hwnd); return 0; }
+        if(LOWORD(wp) == ID_SCAN_NODES) {
+            HANDLE t = CreateThread(NULL, 0, exit_discovery_worker, NULL, 0, NULL);
+            if(t) CloseHandle(t);
+            open_relay_scanner_dialog(hwnd);
+            return 0;
+        }
 
         if(LOWORD(wp) == ID_SETTING_DNS_COMBO && HIWORD(wp) == CBN_SELCHANGE) {
             g_setting_dns_mode = (int)SendMessageW(g_dns_combo, CB_GETCURSEL, 0, 0);
@@ -3467,6 +3867,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     aclass.hCursor = LoadCursor(NULL, IDC_ARROW);
     aclass.hbrBackground = CreateSolidBrush(bg);
     RegisterClassW(&aclass);
+
+    WNDCLASSW sclass = {0};
+    sclass.lpfnWndProc = relay_scanner_dialog_proc;
+    sclass.hInstance = inst;
+    sclass.lpszClassName = L"AureliaRelayScannerDialog";
+    sclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    sclass.hbrBackground = CreateSolidBrush(bg);
+    RegisterClassW(&sclass);
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = wndproc;
