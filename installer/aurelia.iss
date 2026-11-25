@@ -1,4 +1,4 @@
-; Aurelia VPN - Inno Setup Script
+; Aurelia VPN - Professional Inno Setup Script
 #define MyAppName "Aurelia VPN"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "mzguardit"
@@ -21,6 +21,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=Aurelia-Setup-v1.0.0
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -28,11 +30,17 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+
+[Dirs]
+Name: "{app}"; Permissions: users-full
+Name: "{app}\Tor"; Permissions: users-full
+Name: "{localappdata}\Aurelia"; Permissions: users-full
+Name: "{localappdata}\Aurelia\Tor"; Permissions: users-full
 
 [Files]
 Source: "..\build\Release\aurelia.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -42,9 +50,21 @@ Source: "..\build\Release\hev-socks5-tunnel.dll"; DestDir: "{app}"; Flags: ignor
 Source: "..\build\Release\Tor\*"; DestDir: "{app}\Tor"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  DataDir: string;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    DataDir := ExpandConstant('{localappdata}\Aurelia\Tor');
+    ForceDirectories(DataDir);
+  end;
+end;

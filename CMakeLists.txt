@@ -31,6 +31,8 @@ add_dependencies(aurelia aurelia-net)
 
 if(MSVC)
     target_compile_options(aurelia PRIVATE /W4 /utf-8)
+    target_link_options(aurelia PRIVATE "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+    target_link_options(aurelia-net PRIVATE "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
 else()
     target_compile_options(aurelia PRIVATE -Wall -Wextra -Wpedantic)
 endif()

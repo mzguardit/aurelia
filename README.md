@@ -9,7 +9,7 @@
 [![Driver](https://img.shields.io/badge/Driver-Wintun%20TUN-10B981)](https://www.wintun.net/)
 [![Security](https://img.shields.io/badge/Killswitch-WFP%20Fail--Closed-0284C7)](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page)
 [![Tor](https://img.shields.io/badge/Tor%20Network-Embedded%20Core-7D4698?logo=tor-project)](https://www.torproject.org/)
-[![License](https://img.shields.io/badge/License-Non--Commercial%201.0-F59E0B)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 <br/>
 
@@ -109,13 +109,9 @@ To build the installer package:
 
 ---
 
-## 📄 License & Restrictions
+## 📄 License
 
-This project is licensed under the **Aurelia Non-Commercial Public License 1.0**.
-
-- ✅ **Free for Personal Use**: You are free to run, study, audit, and modify this software for personal, academic, and non-commercial security research.
-- ❌ **Commercial Resale Prohibited**: Any commercial distribution, resale, white-labeling, or offering Aurelia as part of a paid commercial service is strictly prohibited without prior written consent.
-
+This project is licensed under the **Apache License, Version 2.0**.
 See the full text in [LICENSE](LICENSE).
 
 ---
