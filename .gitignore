@@ -3,6 +3,7 @@
 # Build outputs & compilers
 build/
 build-*/
+dist/
 x64/
 x86/
 Release/
@@ -33,5 +34,5 @@ settings.ini
 *.tmp
 hev.log
 
-# Large distribution zip (distribute via GitHub Releases)
+# Large distribution files (distributed via GitHub Releases)
 Release.zip

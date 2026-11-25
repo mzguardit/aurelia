@@ -2540,15 +2540,8 @@ static void switch_tab(int tab) {
     if(g_window) InvalidateRect(g_window, NULL, TRUE);
 }
 
-static void paint(HWND hwnd) {
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT cr; GetClientRect(hwnd, &cr);
-    int w = cr.right - cr.left, h = cr.bottom - cr.top;
-    HDC dc = CreateCompatibleDC(hdc);
-    HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
-    HGDIOBJ oldbmp = SelectObject(dc, bmp);
-
+static void paint_dc(HDC dc, int w, int h) {
+    RECT cr = {0, 0, w, h};
     HBRUSH b = CreateSolidBrush(bg); FillRect(dc, &cr, b); DeleteObject(b);
 
     /* header logo */
@@ -2889,7 +2882,17 @@ static void paint(HWND hwnd) {
 
     text(dc, 32, 776, LTXT(L"Aurelia · Kill switch Windows fail-closed · DNS anti-leak nel tunnel · Wintun C-native",
         L"Aurelia · Fail-closed Windows kill switch · Anti-leak tunnel DNS · Wintun C-native"), muted, g_caption);
+}
 
+static void paint(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT cr; GetClientRect(hwnd, &cr);
+    int w = cr.right - cr.left, h = cr.bottom - cr.top;
+    HDC dc = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+    HGDIOBJ oldbmp = SelectObject(dc, bmp);
+    paint_dc(dc, w, h);
     BitBlt(hdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldbmp); DeleteObject(bmp); DeleteDC(dc);
     EndPaint(hwnd, &ps);
@@ -2897,6 +2900,12 @@ static void paint(HWND hwnd) {
 
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch(msg) {
+    case WM_PRINTCLIENT:
+    case WM_PRINT: {
+        RECT cr; GetClientRect(hwnd, &cr);
+        paint_dc((HDC)wp, cr.right - cr.left, cr.bottom - cr.top);
+        return 0;
+    }
     case WM_CREATE:
         g_window = hwnd;
         if(g_app_icon_header || g_app_icon) {
@@ -3334,6 +3343,42 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     g_caption = CreateFontW(12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     g_heading = CreateFontW(29, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     g_emoji = CreateFontW(34, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Emoji");
+
+    if(cmd && wcsstr(cmd, L"--screenshot")) {
+        int w = 1160, h = 840;
+        HDC sdc = GetDC(NULL);
+        HDC dc = CreateCompatibleDC(sdc);
+        BITMAPINFO bi = {0};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 24;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *bits = NULL;
+        HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        HGDIOBJ old = SelectObject(dc, dib);
+        paint_dc(dc, w, h);
+        CreateDirectoryW(L"docs", NULL);
+        FILE *f = NULL;
+        if(_wfopen_s(&f, L"docs\\screenshot.bmp", L"wb") == 0 && f) {
+            int row_bytes = ((w * 3 + 3) / 4) * 4;
+            int img_size = row_bytes * h;
+            BITMAPFILEHEADER bfh = {0};
+            bfh.bfType = 0x4D42;
+            bfh.bfOffBits = (DWORD)(sizeof(bfh) + sizeof(BITMAPINFOHEADER));
+            bfh.bfSize = bfh.bfOffBits + (DWORD)img_size;
+            fwrite(&bfh, sizeof(bfh), 1, f);
+            fwrite(&bi.bmiHeader, sizeof(BITMAPINFOHEADER), 1, f);
+            fwrite(bits, img_size, 1, f);
+            fclose(f);
+        }
+        SelectObject(dc, old);
+        DeleteObject(dib);
+        DeleteDC(dc);
+        ReleaseDC(NULL, sdc);
+        return 0;
+    }
 
     WNDCLASSW pc = {0};
     pc.lpfnWndProc = country_popup_proc;
