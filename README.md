@@ -9,7 +9,7 @@
 [![Driver](https://img.shields.io/badge/Driver-Wintun%20TUN-10B981)](https://www.wintun.net/)
 [![Security](https://img.shields.io/badge/Killswitch-WFP%20Fail--Closed-0284C7)](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page)
 [![Tor](https://img.shields.io/badge/Tor%20Network-Embedded%20Core-7D4698?logo=tor-project)](https://www.torproject.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-GNU%20AGPL%20v3.0-blue.svg)](LICENSE)
 
 <br/>
 
@@ -109,9 +109,13 @@ To build the installer package:
 
 ---
 
-## 📄 License
+## 📄 License & Anti-Commercial Copyleft Protection
 
-This project is licensed under the **Apache License, Version 2.0**.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+
+- 🔒 **Strong Copyleft Protection**: It is legally impossible for third parties or commercial entities to take Aurelia, make it closed-source, white-label it, or integrate it into proprietary paid software. Any modification, derivative work, or network-accessible version MUST remain 100% free and open-source under the same AGPLv3 license.
+- 🚫 **No Proprietary Bundling**: Closed-source commercial exploitation without source code is strictly prohibited by law.
+
 See the full text in [LICENSE](LICENSE).
 
 ---
