@@ -1528,18 +1528,13 @@ static int start_vpn(void) {
     _snwprintf_s(cfgpath, MAX_PATH, _TRUNCATE, L"%s\\tunnel.yaml", appdir);
 
     const wchar_t *pipeline_str = g_setting_pipeline_mode ? L"true" : L"false";
-    const wchar_t *dns_ip = L"198.18.0.2";
-    if (g_setting_dns_mode == 1) dns_ip = L"1.1.1.1";
-    else if (g_setting_dns_mode == 2) dns_ip = L"9.9.9.9";
-    else if (g_setting_dns_mode == 3 && g_setting_custom_dns_ip[0]) dns_ip = g_setting_custom_dns_ip;
-
     const wchar_t *netmask_str = g_setting_fake_ip ? L"255.254.0.0" : L"255.255.0.0";
     const wchar_t *cache_size_str = g_setting_turbo_boost ? L"16384" : L"8192";
 
     wchar_t yaml[2048];
     _snwprintf_s(yaml, _countof(yaml), _TRUNCATE,
-        L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: %s\n  port: 53\n  network: 198.18.0.0\n  netmask: %s\n  cache-size: %s\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
-        dir, dir, pipeline_str, dns_ip, netmask_str, cache_size_str, appdir);
+        L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: 198.18.0.2\n  port: 53\n  network: 198.18.0.0\n  netmask: %s\n  cache-size: %s\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
+        dir, dir, pipeline_str, netmask_str, cache_size_str, appdir);
 
     int ybytes = WideCharToMultiByte(CP_UTF8, 0, yaml, -1, NULL, 0, NULL, NULL);
     char *yutf = (char*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ybytes); if(!yutf) return 0;

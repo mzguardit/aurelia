@@ -37,6 +37,8 @@
 #define RULE_TUN L"Aurelia Tunnel Egress"
 #define RULE_LOOP L"Aurelia Local SOCKS"
 #define RULE_CONTROL L"Aurelia Local Tor Control"
+#define RULE_BLOCK_DNS_UDP L"Aurelia Block Physical DNS UDP"
+#define RULE_BLOCK_DNS_TCP L"Aurelia Block Physical DNS TCP"
 #define TUN_NAME L"Aurelia-Tor"
 
 typedef struct {
@@ -116,11 +118,63 @@ static void remove_rules(void) {
     INetFwPolicy2 *policy=NULL; INetFwRules *rules=NULL;
     if(FAILED(CoCreateInstance(&CLSID_NetFwPolicy2,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwPolicy2,(void**)&policy)))return;
     if(SUCCEEDED(INetFwPolicy2_get_Rules(policy,&rules))) {
-        BSTR names[4]={SysAllocString(RULE_TOR),SysAllocString(RULE_TUN),SysAllocString(RULE_LOOP),SysAllocString(RULE_CONTROL)};
-        for(int i=0;i<4;i++){if(names[i]){INetFwRules_Remove(rules,names[i]);SysFreeString(names[i]);}}
+        BSTR names[6]={SysAllocString(RULE_TOR),SysAllocString(RULE_TUN),SysAllocString(RULE_LOOP),SysAllocString(RULE_CONTROL),SysAllocString(RULE_BLOCK_DNS_UDP),SysAllocString(RULE_BLOCK_DNS_TCP)};
+        for(int i=0;i<6;i++){if(names[i]){INetFwRules_Remove(rules,names[i]);SysFreeString(names[i]);}}
         INetFwRules_Release(rules);
     }
     INetFwPolicy2_Release(policy);
+}
+
+static int add_block_dns_rule(INetFwRules *rules,const wchar_t *name,long protocol) {
+    INetFwRule *r=NULL; HRESULT hr=CoCreateInstance(&CLSID_NetFwRule,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwRule,(void**)&r);
+    if(FAILED(hr))return 0;
+    BSTR bn=SysAllocString(name);
+    BSTR group=SysAllocString(RULE_GROUP);
+    BSTR bports=SysAllocString(L"53");
+    BSTR btypes=SysAllocString(L"Lan,Wireless,RemoteAccess");
+    hr=INetFwRule_put_Name(r,bn);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Grouping(r,group);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Protocol(r,protocol);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_RemotePorts(r,bports);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Direction(r,NET_FW_RULE_DIR_OUT);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Action(r,NET_FW_ACTION_BLOCK);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_InterfaceTypes(r,btypes);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Profiles(r,(long)NET_FW_PROFILE2_ALL);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Enabled(r,VARIANT_TRUE);
+    if(SUCCEEDED(hr)) hr=INetFwRules_Add(rules,r);
+    if(bn)SysFreeString(bn);if(group)SysFreeString(group);if(bports)SysFreeString(bports);if(btypes)SysFreeString(btypes);INetFwRule_Release(r);
+    return SUCCEEDED(hr);
+}
+
+static void flush_dns_cache(void) {
+    HMODULE m=LoadLibraryW(L"dnsapi.dll");
+    if(m) {
+        typedef BOOL (WINAPI *DnsFlushCacheFn)(void);
+        DnsFlushCacheFn fn=(DnsFlushCacheFn)GetProcAddress(m,"DnsFlushResolverCache");
+        if(fn) fn();
+        FreeLibrary(m);
+    }
+}
+
+static void apply_dns_leak_policy(int enable) {
+    HKEY hk=NULL;
+    if(enable) {
+        if(RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient", 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, NULL) == ERROR_SUCCESS) {
+            DWORD one=1, zero=0;
+            RegSetValueExW(hk, L"DisableSmartNameResolution", 0, REG_DWORD, (const BYTE*)&one, sizeof(one));
+            RegSetValueExW(hk, L"EnableMulticast", 0, REG_DWORD, (const BYTE*)&zero, sizeof(zero));
+            RegCloseKey(hk);
+            helper_trace(L"Smart Multi-Homed Name Resolution disabled in registry");
+        }
+    } else {
+        if(RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient", 0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS) {
+            RegDeleteValueW(hk, L"DisableSmartNameResolution");
+            RegDeleteValueW(hk, L"EnableMulticast");
+            RegCloseKey(hk);
+            helper_trace(L"Smart Multi-Homed Name Resolution restored in registry");
+        }
+    }
+    flush_dns_cache();
 }
 
 static int add_rule(INetFwRules *rules,const wchar_t *name,const wchar_t *program,const wchar_t *remote,const wchar_t *ports,const wchar_t *interface_name,DWORD profiles) {
@@ -180,6 +234,8 @@ static int firewall_arm(const wchar_t *tor_path) {
     if(ok&&!add_rule(rules,RULE_TOR,tor_path,NULL,NULL,NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding Tor firewall rule failed");ok=0;}
     if(ok&&!add_rule(rules,RULE_LOOP,NULL,L"127.0.0.1",L"9050,9052",NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local SOCKS firewall rule failed");ok=0;}
     if(ok&&!add_rule(rules,RULE_CONTROL,NULL,L"127.0.0.1",L"9051",NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local control firewall rule failed");ok=0;}
+    if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_UDP,IPPROTO_UDP)){helper_trace(L"adding physical DNS UDP block rule failed");}
+    if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_TCP,IPPROTO_TCP)){helper_trace(L"adding physical DNS TCP block rule failed");}
     if(rules)INetFwRules_Release(rules);
     if(ok) {
         for(int i=0;i<3;i++) {
@@ -214,6 +270,7 @@ static void firewall_restore(void) {
     static const NET_FW_PROFILE_TYPE2 profiles[3]={NET_FW_PROFILE2_DOMAIN,NET_FW_PROFILE2_PRIVATE,NET_FW_PROFILE2_PUBLIC};
     INetFwPolicy2 *policy=NULL;
     remove_rules();
+    apply_dns_leak_policy(0);
     if(FAILED(CoCreateInstance(&CLSID_NetFwPolicy2,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwPolicy2,(void**)&policy)))return;
     for(int i=0;i<3;i++) {
         INetFwPolicy2_put_DefaultOutboundAction(policy,profiles[i],(NET_FW_ACTION)state.old_action[i]);
@@ -348,6 +405,7 @@ static int route_up(DWORD tun_index) {
         }
         DNS_INTERFACE_SETTINGS set;ZeroMemory(&set,sizeof(set));set.Version=DNS_INTERFACE_SETTINGS_VERSION1;set.Flags=DNS_SETTING_NAMESERVER;set.NameServer=L"198.18.0.2";
         ok=SetInterfaceDnsSettings(guid,&set)==NO_ERROR;
+        if(ok) apply_dns_leak_policy(1);
     }
     if(ok) ok=verify_tunnel_default_route(tun_index);
     if(!ok){helper_trace(L"route-up could not establish verified default routes or DNS");remove_routes();restore_tunnel_metrics();state.tunnel_index=0;state_write_locked();}
@@ -359,6 +417,7 @@ static int route_up(DWORD tun_index) {
 
 static int route_down(void) {
     if(WaitForSingleObject(state_mutex,5000)!=WAIT_OBJECT_0)return 0;
+    apply_dns_leak_policy(0);
     if(state.tunnel_index&&state.dns_saved) {
         DNS_INTERFACE_SETTINGS set;ZeroMemory(&set,sizeof(set));set.Version=DNS_INTERFACE_SETTINGS_VERSION1;set.Flags=DNS_SETTING_NAMESERVER;set.NameServer=state.old_dns_servers;
         SetInterfaceDnsSettings(state.tunnel_guid,&set);
