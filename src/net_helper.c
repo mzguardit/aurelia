@@ -39,6 +39,8 @@
 #define RULE_CONTROL L"Aurelia Local Tor Control"
 #define RULE_BLOCK_DNS_UDP L"Aurelia Block Physical DNS UDP"
 #define RULE_BLOCK_DNS_TCP L"Aurelia Block Physical DNS TCP"
+#define RULE_BLOCK_STUN L"Aurelia Block WebRTC STUN UDP"
+#define RULE_BLOCK_REBIND L"Aurelia Block LAN Rebind TCP"
 #define TUN_NAME L"Aurelia-Tor"
 
 typedef struct {
@@ -118,11 +120,83 @@ static void remove_rules(void) {
     INetFwPolicy2 *policy=NULL; INetFwRules *rules=NULL;
     if(FAILED(CoCreateInstance(&CLSID_NetFwPolicy2,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwPolicy2,(void**)&policy)))return;
     if(SUCCEEDED(INetFwPolicy2_get_Rules(policy,&rules))) {
-        BSTR names[6]={SysAllocString(RULE_TOR),SysAllocString(RULE_TUN),SysAllocString(RULE_LOOP),SysAllocString(RULE_CONTROL),SysAllocString(RULE_BLOCK_DNS_UDP),SysAllocString(RULE_BLOCK_DNS_TCP)};
-        for(int i=0;i<6;i++){if(names[i]){INetFwRules_Remove(rules,names[i]);SysFreeString(names[i]);}}
+        BSTR names[8]={
+            SysAllocString(RULE_TOR),SysAllocString(RULE_TUN),SysAllocString(RULE_LOOP),SysAllocString(RULE_CONTROL),
+            SysAllocString(RULE_BLOCK_DNS_UDP),SysAllocString(RULE_BLOCK_DNS_TCP),
+            SysAllocString(RULE_BLOCK_STUN),SysAllocString(RULE_BLOCK_REBIND)
+        };
+        for(int i=0;i<8;i++){if(names[i]){INetFwRules_Remove(rules,names[i]);SysFreeString(names[i]);}}
         INetFwRules_Release(rules);
     }
     INetFwPolicy2_Release(policy);
+}
+
+static int add_block_ports_rule(INetFwRules *rules,const wchar_t *name,const wchar_t *ports,long protocol,const wchar_t *types) {
+    INetFwRule *r=NULL; HRESULT hr=CoCreateInstance(&CLSID_NetFwRule,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwRule,(void**)&r);
+    if(FAILED(hr))return 0;
+    BSTR bn=SysAllocString(name), group=SysAllocString(RULE_GROUP), bports=ports?SysAllocString(ports):NULL, btypes=types?SysAllocString(types):NULL;
+    hr=INetFwRule_put_Name(r,bn);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Grouping(r,group);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Protocol(r,protocol);
+    if(SUCCEEDED(hr)&&bports) hr=INetFwRule_put_RemotePorts(r,bports);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Direction(r,NET_FW_RULE_DIR_OUT);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Action(r,NET_FW_ACTION_BLOCK);
+    if(SUCCEEDED(hr)&&btypes) hr=INetFwRule_put_InterfaceTypes(r,btypes);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Profiles(r,(long)NET_FW_PROFILE2_ALL);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Enabled(r,VARIANT_TRUE);
+    if(SUCCEEDED(hr)) hr=INetFwRules_Add(rules,r);
+    if(bn)SysFreeString(bn);if(group)SysFreeString(group);if(bports)SysFreeString(bports);if(btypes)SysFreeString(btypes);INetFwRule_Release(r);
+    return SUCCEEDED(hr);
+}
+
+static int add_block_addr_rule(INetFwRules *rules,const wchar_t *name,const wchar_t *remote_addrs,const wchar_t *interface_name) {
+    INetFwRule *r=NULL; HRESULT hr=CoCreateInstance(&CLSID_NetFwRule,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwRule,(void**)&r);
+    if(FAILED(hr))return 0;
+    BSTR bn=SysAllocString(name), group=SysAllocString(RULE_GROUP), baddrs=remote_addrs?SysAllocString(remote_addrs):NULL;
+    hr=INetFwRule_put_Name(r,bn);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Grouping(r,group);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Protocol(r,NET_FW_IP_PROTOCOL_ANY);
+    if(SUCCEEDED(hr)&&baddrs) hr=INetFwRule_put_RemoteAddresses(r,baddrs);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Direction(r,NET_FW_RULE_DIR_OUT);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Action(r,NET_FW_ACTION_BLOCK);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Profiles(r,(long)NET_FW_PROFILE2_ALL);
+    if(SUCCEEDED(hr)) hr=INetFwRule_put_Enabled(r,VARIANT_TRUE);
+    if(SUCCEEDED(hr)&&interface_name) {
+        VARIANT v; VariantInit(&v); v.vt=VT_ARRAY|VT_VARIANT; v.parray=SafeArrayCreateVector(VT_VARIANT,0,1);
+        if(v.parray){
+            LONG i=0;VARIANT item;VariantInit(&item);item.vt=VT_BSTR;item.bstrVal=SysAllocString(interface_name);
+            hr=SafeArrayPutElement(v.parray,&i,&item);VariantClear(&item);
+            if(SUCCEEDED(hr)) hr=INetFwRule_put_Interfaces(r,v);
+            VariantClear(&v);
+        }
+    }
+    if(SUCCEEDED(hr)) hr=INetFwRules_Add(rules,r);
+    if(bn)SysFreeString(bn);if(group)SysFreeString(group);if(baddrs)SysFreeString(baddrs);INetFwRule_Release(r);
+    return SUCCEEDED(hr);
+}
+
+static void apply_webrtc_policy(int enable) {
+    static const wchar_t *browsers[] = {
+        L"SOFTWARE\\Policies\\Google\\Chrome",
+        L"SOFTWARE\\Policies\\Microsoft\\Edge"
+    };
+    for(int i = 0; i < 2; i++) {
+        HKEY hk = NULL;
+        if(enable) {
+            if(RegCreateKeyExW(HKEY_LOCAL_MACHINE, browsers[i], 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, NULL) == ERROR_SUCCESS) {
+                const wchar_t *val = L"disable_non_proxied_udp";
+                RegSetValueExW(hk, L"WebRtcIPHandlingPolicy", 0, REG_SZ, (const BYTE*)val, (DWORD)((wcslen(val) + 1) * sizeof(wchar_t)));
+                RegCloseKey(hk);
+            }
+        } else {
+            if(RegOpenKeyExW(HKEY_LOCAL_MACHINE, browsers[i], 0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS) {
+                RegDeleteValueW(hk, L"WebRtcIPHandlingPolicy");
+                RegCloseKey(hk);
+            }
+        }
+    }
+    if(enable) helper_trace(L"WebRTC non-proxied UDP disabled in Chromium/Edge policy");
+    else helper_trace(L"WebRTC policy restored");
 }
 
 static int add_block_dns_rule(INetFwRules *rules,const wchar_t *name,long protocol) {
@@ -236,6 +310,16 @@ static int firewall_arm(const wchar_t *tor_path) {
     if(ok&&!add_rule(rules,RULE_CONTROL,NULL,L"127.0.0.1",L"9051",NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local control firewall rule failed");ok=0;}
     if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_UDP,IPPROTO_UDP)){helper_trace(L"adding physical DNS UDP block rule failed");}
     if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_TCP,IPPROTO_TCP)){helper_trace(L"adding physical DNS TCP block rule failed");}
+    wchar_t ini[MAX_PATH];
+    wchar_t *local = _wgetenv(L"LOCALAPPDATA");
+    _snwprintf_s(ini, MAX_PATH, _TRUNCATE, L"%s\\Aurelia\\settings.ini", local ? local : L"C:\\ProgramData");
+    int webrtc_on = GetPrivateProfileIntW(L"Settings", L"WebRtcShield", 1, ini);
+    if(ok && webrtc_on) {
+        if(!add_block_ports_rule(rules, RULE_BLOCK_STUN, L"3478,5349,19302,19303,19304,19305", IPPROTO_UDP, L"Lan,Wireless,RemoteAccess")) {
+            helper_trace(L"adding WebRTC STUN block rule failed");
+        }
+        apply_webrtc_policy(1);
+    }
     if(rules)INetFwRules_Release(rules);
     if(ok) {
         for(int i=0;i<3;i++) {
@@ -259,6 +343,17 @@ static int firewall_allow_tunnel(void) {
         BSTR name=SysAllocString(RULE_TUN);
         if(name){INetFwRules_Remove(rules,name);SysFreeString(name);}
         ok=add_rule(rules,RULE_TUN,NULL,NULL,NULL,TUN_NAME,NET_FW_PROFILE2_ALL);
+        wchar_t ini[MAX_PATH];
+        wchar_t *local = _wgetenv(L"LOCALAPPDATA");
+        _snwprintf_s(ini, MAX_PATH, _TRUNCATE, L"%s\\Aurelia\\settings.ini", local ? local : L"C:\\ProgramData");
+        int rebind_on = GetPrivateProfileIntW(L"Settings", L"DnsRebindShield", 1, ini);
+        if(ok && rebind_on) {
+            BSTR br_name = SysAllocString(RULE_BLOCK_REBIND);
+            if(br_name){INetFwRules_Remove(rules, br_name); SysFreeString(br_name);}
+            if(!add_block_addr_rule(rules, RULE_BLOCK_REBIND, L"10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", TUN_NAME)) {
+                helper_trace(L"adding LAN Rebind block rule failed");
+            }
+        }
     }
     if(rules)INetFwRules_Release(rules);INetFwPolicy2_Release(policy);
     if(!ok)helper_trace(L"adding tunnel firewall rule after adapter creation failed");
@@ -271,6 +366,7 @@ static void firewall_restore(void) {
     INetFwPolicy2 *policy=NULL;
     remove_rules();
     apply_dns_leak_policy(0);
+    apply_webrtc_policy(0);
     if(FAILED(CoCreateInstance(&CLSID_NetFwPolicy2,NULL,CLSCTX_INPROC_SERVER,&IID_INetFwPolicy2,(void**)&policy)))return;
     for(int i=0;i<3;i++) {
         INetFwPolicy2_put_DefaultOutboundAction(policy,profiles[i],(NET_FW_ACTION)state.old_action[i]);
@@ -418,6 +514,7 @@ static int route_up(DWORD tun_index) {
 static int route_down(void) {
     if(WaitForSingleObject(state_mutex,5000)!=WAIT_OBJECT_0)return 0;
     apply_dns_leak_policy(0);
+    apply_webrtc_policy(0);
     if(state.tunnel_index&&state.dns_saved) {
         DNS_INTERFACE_SETTINGS set;ZeroMemory(&set,sizeof(set));set.Version=DNS_INTERFACE_SETTINGS_VERSION1;set.Flags=DNS_SETTING_NAMESERVER;set.NameServer=state.old_dns_servers;
         SetInterfaceDnsSettings(state.tunnel_guid,&set);
