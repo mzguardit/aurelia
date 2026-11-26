@@ -242,3 +242,8 @@ Aurelia è un client VPN per Windows nativo in C11 progettato per instradare l'i
 - **Protezione Kill Switch WFP Fail-Closed**: Blocco a livello kernel di qualsiasi pacchetto IPv4/IPv6 non instradato.
 - **Nessuna usura disco**: Stato del consenso conservato puramente in RAM (`AvoidDiskWrites`).
 - **Supporto Pentest**: Porta ausiliaria SOCKS5 su 127.0.0.1:9052 per Burp Suite, OWASP ZAP e strumenti di sicurezza.
+
+## Copyright & Licenza
+
+- Copyright (c) 2026 [softedition.com](https://softedition.com) - Tutti i diritti riservati.
+- Distribuito con licenza open source GNU Affero General Public License v3.0 (AGPL-3.0).

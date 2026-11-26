@@ -21,11 +21,13 @@
 #include <objbase.h>
 #include <math.h>
 #include <ctype.h>
+#include <wininet.h>
 
 #define APP_NAME L"Aurelia"
+#define APP_VERSION_STR L"1.1.0"
 #define IDI_AURELIA 101
-#define WIN_W 1160
-#define WIN_H 800
+#define WIN_W 1144
+#define WIN_H 780
 
 enum {
     ID_CONNECT = 100,
@@ -35,13 +37,19 @@ enum {
     ID_COUNTRY,
     ID_AUDIT,
     ID_SCAN_NODES,
+    ID_ABOUT = 107,
     ID_SETTING_DNS_COMBO = 120,
     ID_SETTING_DNS_EDIT = 121,
     ID_SETTING_SAVE_BTN = 122,
+    ID_SETTING_VIEW_TOS = 123,
     ID_SCANNER_SYNC_CONSENSUS = 130,
     ID_SCANNER_RESET_GUARDS = 131,
     ID_SCANNER_TEST_PING = 132,
-    ID_SCANNER_CLOSE = 133
+    ID_SCANNER_CLOSE = 133,
+    ID_ABOUT_CHECK_UPDATE = 410,
+    ID_ABOUT_VISIT_SITE = 411,
+    ID_ABOUT_VIEW_TOS = 412,
+    ID_ABOUT_CLOSE = 413
 };
 
 enum {
@@ -74,16 +82,21 @@ static int g_setting_stealth_mode = 1;
 static int g_setting_fake_ip = 1;
 static int g_setting_webrtc_shield = 1;
 static int g_setting_dns_rebind_shield = 1;
+static int g_setting_ipv6_shield = 1;
 static DWORD g_settings_saved_tick = 0;
 
-static HWND g_dns_combo = NULL, g_dns_edit = NULL, g_btn_save_settings = NULL;
+static HWND g_dns_combo = NULL, g_dns_edit = NULL, g_btn_save_settings = NULL, g_btn_view_tos = NULL, g_btn_about = NULL;
+static HWND g_dns_popup = NULL;
+static int g_dns_hover = -1;
 
 #define WM_VPN_RESULT (WM_APP+10)
 #define WM_CIRCUIT_RESULT (WM_APP+11)
 #define WM_TRAYICON (WM_APP+12)
 #define WM_COUNTRY_RESULT (WM_APP+13)
 #define WM_ATTESTATION_RESULT (WM_APP+14)
+#define WM_UPDATE_RESULT (WM_APP+15)
 enum { ID_AUDIT_COPY_BURP = 301, ID_AUDIT_RETEST = 302, ID_AUDIT_CLOSE = 303, ID_AUDIT_REALIGN_DNS = 304 };
+enum { ID_TOS_ACCEPT = 401, ID_TOS_DECLINE = 402, ID_TOS_CLOSE = 403 };
 #define ID_TRAY_SHOW 201
 #define ID_TRAY_CONNECT 202
 #define ID_TRAY_EXIT 203
@@ -353,24 +366,22 @@ static void tray_menu(void) {
     }
 }
 
+static const wchar_t *dns_mode_name(int mode) {
+    switch(mode) {
+    case 0: return LTXT(L"Tor MapDNS Geo-Aligned (Consigliato · 0 ms · Auto-Aligned)",
+                        L"Tor MapDNS Geo-Aligned (Recommended · 0 ms · Auto-Aligned)");
+    case 1: return LTXT(L"Cloudflare Privacy Gateway (1.1.1.1 · No-ECS · Anti-Phishing)",
+                        L"Cloudflare Privacy Gateway (1.1.1.1 · No-ECS · Anti-Phishing)");
+    case 2: return LTXT(L"Quad9 Security DNS (9.9.9.9 · Blocco Minacce & C2)",
+                        L"Quad9 Security DNS (9.9.9.9 · Threat & C2 Blocking)");
+    case 3: return LTXT(L"DNS Personalizzato / Regional Resolver (Manuale...)",
+                        L"Custom DNS / Regional Resolver (Manual IPv4...)");
+    default: return L"Tor MapDNS Geo-Aligned";
+    }
+}
+
 static void update_dns_combo_items(void) {
-    if(!g_dns_combo) return;
-    int cur = (int)SendMessageW(g_dns_combo, CB_GETCURSEL, 0, 0);
-    if(cur < 0) cur = g_setting_dns_mode;
-    SendMessageW(g_dns_combo, CB_RESETCONTENT, 0, 0);
-    SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)LTXT(
-        L"Tor MapDNS Geo-Aligned (Consigliato · 0 ms · Allineamento Automatico)",
-        L"Tor MapDNS Geo-Aligned (Recommended · 0 ms · Auto-Aligned)"));
-    SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)LTXT(
-        L"Cloudflare Privacy Gateway (1.1.1.1 · No-ECS · Anti-Phishing)",
-        L"Cloudflare Privacy Gateway (1.1.1.1 · No-ECS · Anti-Phishing)"));
-    SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)LTXT(
-        L"Quad9 Security DNS (9.9.9.9 · Blocco Minacce & C2)",
-        L"Quad9 Security DNS (9.9.9.9 · Threat & C2 Blocking)"));
-    SendMessageW(g_dns_combo, CB_ADDSTRING, 0, (LPARAM)LTXT(
-        L"DNS Personalizzato / Regional Resolver (IPv4 Manuale...)",
-        L"Custom DNS / Regional Resolver (Manual IPv4...)"));
-    SendMessageW(g_dns_combo, CB_SETCURSEL, (WPARAM)cur, 0);
+    if(g_dns_combo) InvalidateRect(g_dns_combo, NULL, TRUE);
 }
 
 static void apply_language(void) {
@@ -383,6 +394,8 @@ static void apply_language(void) {
     if(g_audit) SetWindowTextW(g_audit, LTXT(L"Audit & Sicurezza", L"Audit & Security"));
     if(g_btn_scan_nodes) SetWindowTextW(g_btn_scan_nodes, LTXT(L"Scan Nodi", L"Scan Nodes"));
     if(g_btn_save_settings) SetWindowTextW(g_btn_save_settings, LTXT(L"Salva e Applica Impostazioni", L"Save & Apply Settings"));
+    if(g_btn_view_tos) SetWindowTextW(g_btn_view_tos, LTXT(L"Termini (ToS)", L"Terms of Service"));
+    if(g_btn_about) SetWindowTextW(g_btn_about, LTXT(L"Info", L"About"));
     if(g_language) InvalidateRect(g_language, NULL, TRUE);
     save_preferences();
     InvalidateRect(g_window, NULL, TRUE);
@@ -424,6 +437,8 @@ static void save_preferences(void) {
     WritePrivateProfileStringW(L"Settings", L"WebRtcShield", value, g_settings_path);
     _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_dns_rebind_shield);
     WritePrivateProfileStringW(L"Settings", L"DnsRebindShield", value, g_settings_path);
+    _snwprintf_s(value, _countof(value), _TRUNCATE, L"%d", g_setting_ipv6_shield);
+    WritePrivateProfileStringW(L"Settings", L"Ipv6Shield", value, g_settings_path);
 }
 
 static void load_preferences(void) {
@@ -454,6 +469,7 @@ static void load_preferences(void) {
     g_setting_fake_ip = (int)GetPrivateProfileIntW(L"Settings", L"FakeIpPool", 1, g_settings_path);
     g_setting_webrtc_shield = (int)GetPrivateProfileIntW(L"Settings", L"WebRtcShield", 1, g_settings_path);
     g_setting_dns_rebind_shield = (int)GetPrivateProfileIntW(L"Settings", L"DnsRebindShield", 1, g_settings_path);
+    g_setting_ipv6_shield = (int)GetPrivateProfileIntW(L"Settings", L"Ipv6Shield", 1, g_settings_path);
 }
 
 static void trace_start(const wchar_t *stage) {
@@ -2341,7 +2357,172 @@ static void toggle_language_popup(void) {
     }
 }
 
-static void draw_shield(HDC dc, int cx, int cy) {
+static void draw_dns_button(const DRAWITEMSTRUCT *d) {
+    HDC dc = d->hDC; RECT r = d->rcItem;
+    rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, RGB(255, 255, 255), 10);
+    HPEN edge = CreatePen(PS_SOLID, 1, g_dns_popup ? teal : RGB(211, 221, 232)), old = (HPEN)SelectObject(dc, edge);
+    HGDIOBJ brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, 10, 10);
+    SelectObject(dc, brush); SelectObject(dc, old); DeleteObject(edge);
+
+    COLORREF dot_c = (g_setting_dns_mode == 0) ? green :
+                     ((g_setting_dns_mode == 1) ? RGB(246, 130, 31) :
+                     ((g_setting_dns_mode == 2) ? RGB(218, 41, 28) : teal));
+    dot(dc, r.left + 14, r.top + (r.bottom - r.top) / 2 - 4, 8, dot_c);
+
+    RECT label = {r.left + 30, r.top, r.right - 36, r.bottom};
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(20, 35, 50));
+    HFONT f = (HFONT)SelectObject(dc, g_font);
+    DrawTextW(dc, dns_mode_name(g_setting_dns_mode), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, f);
+
+    POINT arrow[3] = {{r.right - 24, r.top + (r.bottom - r.top) / 2 - 2},
+                      {r.right - 14, r.top + (r.bottom - r.top) / 2 - 2},
+                      {r.right - 19, r.top + (r.bottom - r.top) / 2 + 4}};
+    HBRUSH ab = CreateSolidBrush(muted);
+    HGDIOBJ ob = SelectObject(dc, ab);
+    Polygon(dc, arrow, 3);
+    SelectObject(dc, ob); DeleteObject(ab);
+}
+
+static void dns_popup_paint(HWND hwnd) {
+    PAINTSTRUCT ps; HDC screen_dc = BeginPaint(hwnd, &ps);
+    RECT all; GetClientRect(hwnd, &all);
+    int w = all.right - all.left, h = all.bottom - all.top;
+    HDC dc = CreateCompatibleDC(screen_dc);
+    HBITMAP bmp = CreateCompatibleBitmap(screen_dc, w, h);
+    HGDIOBJ oldbmp = SelectObject(dc, bmp);
+
+    HBRUSH b = CreateSolidBrush(panel); FillRect(dc, &all, b); DeleteObject(b);
+
+    RECT header = {1, 1, all.right - 1, 38};
+    HBRUSH hb = CreateSolidBrush(RGB(247, 250, 253)); FillRect(dc, &header, hb); DeleteObject(hb);
+
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, muted);
+    HFONT cap = (HFONT)SelectObject(dc, g_caption);
+    const wchar_t *heading = LTXT(L"MODALITÀ RISOLUTORE DNS", L"DNS RESOLVER MODES");
+    TextOutW(dc, 14, 11, heading, (int)wcslen(heading));
+    SelectObject(dc, cap);
+
+    HPEN hp = CreatePen(PS_SOLID, 1, line), ho = (HPEN)SelectObject(dc, hp);
+    MoveToEx(dc, 1, 38, NULL); LineTo(dc, all.right - 1, 38);
+    SelectObject(dc, ho); DeleteObject(hp);
+
+    for(int i = 0; i < 4; i++) {
+        RECT r = {2, 40 + i * 42, all.right - 3, 40 + (i + 1) * 42};
+        COLORREF fill = (i == g_setting_dns_mode) ? RGB(232, 243, 255) :
+                        (i == g_dns_hover ? RGB(245, 249, 253) : RGB(255, 255, 255));
+        HBRUSH rb = CreateSolidBrush(fill); FillRect(dc, &r, rb); DeleteObject(rb);
+
+        COLORREF dot_c = (i == 0) ? green :
+                         ((i == 1) ? RGB(246, 130, 31) :
+                         ((i == 2) ? RGB(218, 41, 28) : teal));
+        dot(dc, 16, r.top + 17, 8, dot_c);
+
+        RECT label = {32, r.top, all.right - 36, r.bottom};
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(20, 35, 50));
+        HFONT old = (HFONT)SelectObject(dc, (i == g_setting_dns_mode) ? (g_font_bold ? g_font_bold : g_font) : g_font);
+        DrawTextW(dc, dns_mode_name(i), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, old);
+
+        if(i == g_setting_dns_mode) {
+            HPEN p = CreatePen(PS_SOLID, 2, teal), op = (HPEN)SelectObject(dc, p);
+            MoveToEx(dc, all.right - 24, r.top + 22, NULL);
+            LineTo(dc, all.right - 19, r.top + 27);
+            LineTo(dc, all.right - 11, r.top + 16);
+            SelectObject(dc, op); DeleteObject(p);
+        }
+        if(i < 3) {
+            HPEN p = CreatePen(PS_SOLID, 1, RGB(241, 244, 248)), op = (HPEN)SelectObject(dc, p);
+            MoveToEx(dc, 12, r.bottom - 1, NULL); LineTo(dc, all.right - 12, r.bottom - 1);
+            SelectObject(dc, op); DeleteObject(p);
+        }
+    }
+
+    BitBlt(screen_dc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldbmp); DeleteObject(bmp); DeleteDC(dc);
+    EndPaint(hwnd, &ps);
+}
+
+static void choose_dns_mode(int mode) {
+    if(mode < 0 || mode > 3) mode = 0;
+    g_setting_dns_mode = mode;
+    save_preferences();
+    ShowWindow(g_dns_edit, (g_setting_dns_mode == 3) ? SW_SHOW : SW_HIDE);
+    if(g_dns_combo) InvalidateRect(g_dns_combo, NULL, TRUE);
+    if(g_window) InvalidateRect(g_window, NULL, FALSE);
+}
+
+static LRESULT CALLBACK dns_popup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch(msg) {
+    case WM_PAINT: dns_popup_paint(hwnd); return 0;
+    case WM_MOUSEMOVE: {
+        int y = (int)(short)HIWORD(lp);
+        int row = (y >= 40) ? (y - 40) / 42 : -1;
+        if(row < 0 || row > 3) row = -1;
+        if(row != g_dns_hover) { g_dns_hover = row; InvalidateRect(hwnd, NULL, FALSE); }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        int y = (int)(short)HIWORD(lp);
+        int row = (y >= 40) ? (y - 40) / 42 : -1;
+        if(row >= 0 && row < 4) choose_dns_mode(row);
+        DestroyWindow(hwnd); g_dns_popup = NULL;
+        InvalidateRect(g_dns_combo, NULL, FALSE);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if(wp == VK_ESCAPE) { DestroyWindow(hwnd); g_dns_popup = NULL; InvalidateRect(g_dns_combo, NULL, FALSE); return 0; }
+        if(wp == VK_UP || wp == VK_DOWN) {
+            if(g_dns_hover < 0) g_dns_hover = g_setting_dns_mode;
+            g_dns_hover += (wp == VK_DOWN ? 1 : -1);
+            if(g_dns_hover < 0) g_dns_hover = 0;
+            if(g_dns_hover > 3) g_dns_hover = 3;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if(wp == VK_RETURN) {
+            choose_dns_mode(g_dns_hover < 0 ? g_setting_dns_mode : g_dns_hover);
+            DestroyWindow(hwnd); g_dns_popup = NULL;
+            InvalidateRect(g_dns_combo, NULL, FALSE);
+            return 0;
+        }
+        break;
+    case WM_ACTIVATE:
+        if(LOWORD(wp) == WA_INACTIVE) { g_dns_popup = NULL; DestroyWindow(hwnd); InvalidateRect(g_dns_combo, NULL, FALSE); }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void toggle_dns_popup(void) {
+    if(g_dns_popup) {
+        DestroyWindow(g_dns_popup); g_dns_popup = NULL;
+        InvalidateRect(g_dns_combo, NULL, FALSE); return;
+    }
+    RECT r; GetWindowRect(g_dns_combo, &r);
+    int y = r.bottom;
+    int pop_h = 40 + 4 * 42 + 2;
+    HMONITOR mon = MonitorFromWindow(g_window, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {sizeof(mi)};
+    if(GetMonitorInfoW(mon, &mi) && y + pop_h > mi.rcWork.bottom) y = r.top - pop_h;
+    g_dns_hover = -1;
+    g_dns_popup = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"AureliaDnsPopup", NULL,
+                                 WS_POPUP | WS_BORDER, r.left, y, r.right - r.left, pop_h,
+                                 g_window, NULL, g_instance, NULL);
+    if(g_dns_popup) {
+        ShowWindow(g_dns_popup, SW_SHOWNOACTIVATE);
+        SetForegroundWindow(g_dns_popup);
+        SetFocus(g_dns_popup);
+        InvalidateRect(g_dns_popup, NULL, TRUE);
+        InvalidateRect(g_dns_combo, NULL, FALSE);
+    }
+}
+
+static void draw_shield(HDC dc, int cx, int cy, float scale) {
+    if(scale < 0.5f) scale = 0.5f;
+    if(scale > 1.0f) scale = 1.0f;
+
     if(g_gdiplus_ready) {
         void *g = NULL;
         if(pfn_GdipCreateFromHDC(dc, &g) == 0 && g) {
@@ -2353,54 +2534,61 @@ static void draw_shield(HDC dc, int cx, int cy) {
             ARGB ring_inner   = g_vpn_active ? GDIP_MAKE_ARGB(80, 0, 144, 105)  : GDIP_MAKE_ARGB(55, 0, 114, 198);
             ARGB shield_fill  = g_vpn_active ? GDIP_MAKE_ARGB(245, 230, 248, 240) : GDIP_MAKE_ARGB(245, 238, 246, 255);
 
+            float r_aura = 96.0f * scale;
+            float r_out  = 82.0f * scale;
+            float r_in   = 64.0f * scale;
+            float r_orb  = 73.0f * scale;
+
             // Soft glowing outer ambient aura
             void *aura_brush = NULL;
             if(pfn_GdipCreateSolidFill(aura_color, &aura_brush) == 0 && aura_brush) {
-                pfn_GdipFillEllipse(g, aura_brush, (float)(cx - 96), (float)(cy - 96), 192.0f, 192.0f);
+                pfn_GdipFillEllipse(g, aura_brush, (float)cx - r_aura, (float)cy - r_aura, r_aura * 2.0f, r_aura * 2.0f);
                 pfn_GdipDeleteBrush(aura_brush);
             }
 
-            // Outer smooth antialiased ring (radius 82)
+            // Outer smooth antialiased ring
             void *ring_pen1 = NULL;
-            if(pfn_GdipCreatePen1(ring_outer, 2.0f, 2, &ring_pen1) == 0 && ring_pen1) {
-                pfn_GdipDrawEllipse(g, ring_pen1, (float)(cx - 82), (float)(cy - 82), 164.0f, 164.0f);
+            if(pfn_GdipCreatePen1(ring_outer, 2.0f * scale, 2, &ring_pen1) == 0 && ring_pen1) {
+                pfn_GdipDrawEllipse(g, ring_pen1, (float)cx - r_out, (float)cy - r_out, r_out * 2.0f, r_out * 2.0f);
                 pfn_GdipDeletePen(ring_pen1);
             }
 
-            // Inner smooth antialiased ring (radius 64)
+            // Inner smooth antialiased ring
             void *ring_pen2 = NULL;
-            if(pfn_GdipCreatePen1(ring_inner, 1.5f, 2, &ring_pen2) == 0 && ring_pen2) {
-                pfn_GdipDrawEllipse(g, ring_pen2, (float)(cx - 64), (float)(cy - 64), 128.0f, 128.0f);
+            if(pfn_GdipCreatePen1(ring_inner, 1.5f * scale, 2, &ring_pen2) == 0 && ring_pen2) {
+                pfn_GdipDrawEllipse(g, ring_pen2, (float)cx - r_in, (float)cy - r_in, r_in * 2.0f, r_in * 2.0f);
                 pfn_GdipDeletePen(ring_pen2);
             }
 
-            // Orbiting photon / satellite on track radius 73
+            // Orbiting photon / satellite on track
             double a = (double)(g_anim_phase % 360) * 3.141592653589793 / 180.0;
-            float px = (float)cx + (float)(cos(a) * 73.0);
-            float py = (float)cy + (float)(sin(a) * 73.0);
+            float px = (float)cx + (float)(cos(a) * (double)r_orb);
+            float py = (float)cy + (float)(sin(a) * (double)r_orb);
 
             // Satellite outer glow
             ARGB halo_color = g_vpn_active ? GDIP_MAKE_ARGB(80, 0, 144, 105) : GDIP_MAKE_ARGB(80, 0, 114, 198);
             void *halo_brush = NULL;
             if(pfn_GdipCreateSolidFill(halo_color, &halo_brush) == 0 && halo_brush) {
-                pfn_GdipFillEllipse(g, halo_brush, px - 9.0f, py - 9.0f, 18.0f, 18.0f);
+                float halo_r = 9.0f * scale;
+                pfn_GdipFillEllipse(g, halo_brush, px - halo_r, py - halo_r, halo_r * 2.0f, halo_r * 2.0f);
                 pfn_GdipDeleteBrush(halo_brush);
             }
             // Satellite solid core
             void *sat_brush = NULL;
             if(pfn_GdipCreateSolidFill(accent_color, &sat_brush) == 0 && sat_brush) {
-                pfn_GdipFillEllipse(g, sat_brush, px - 5.0f, py - 5.0f, 10.0f, 10.0f);
+                float sat_r = 5.0f * scale;
+                pfn_GdipFillEllipse(g, sat_brush, px - sat_r, py - sat_r, sat_r * 2.0f, sat_r * 2.0f);
                 pfn_GdipDeleteBrush(sat_brush);
             }
 
-            // Antialiased Shield Polygon
+            // Antialiased Shield Polygon scaled
             PointF pts[6] = {
-                {(float)cx, (float)(cy - 36)},
-                {(float)(cx + 28), (float)(cy - 24)},
-                {(float)(cx + 25), (float)(cy + 13)},
-                {(float)cx, (float)(cy + 38)},
-                {(float)(cx - 25), (float)(cy + 13)},
-                {(float)(cx - 28), (float)(cy - 24)}
+                {(float)cx, (float)cy - 36.0f * scale},
+                {(float)cx + 28.0f * scale, (float)cy - 24.0f * scale},
+                {(float)cx + 25.0f * scale, (float)cy + 13.0f * scale},
+                {(float)cx, (float)cy + 38.0f * scale},
+                {(float)cx - 25.0f * scale, (float)cy + 13.0f * scale},
+                {(float)cx - 28.0f * scale, (float)cy - 24.0f * scale}
             };
 
             void *shield_b = NULL;
@@ -2410,20 +2598,22 @@ static void draw_shield(HDC dc, int cx, int cy) {
             }
 
             void *shield_p = NULL;
-            if(pfn_GdipCreatePen1(accent_color, 2.5f, 2, &shield_p) == 0 && shield_p) {
+            if(pfn_GdipCreatePen1(accent_color, 2.5f * scale, 2, &shield_p) == 0 && shield_p) {
                 pfn_GdipSetPenLineJoin(shield_p, 2); // LineJoinRound
                 pfn_GdipDrawPolygon(g, shield_p, pts, 6);
                 pfn_GdipDeletePen(shield_p);
             }
 
-            // Antialiased Checkmark with round caps
+            // Antialiased Checkmark with round caps scaled
             void *check_p = NULL;
-            if(pfn_GdipCreatePen1(accent_color, 3.2f, 2, &check_p) == 0 && check_p) {
+            if(pfn_GdipCreatePen1(accent_color, 3.2f * scale, 2, &check_p) == 0 && check_p) {
                 pfn_GdipSetPenStartCap(check_p, 2); // LineCapRound
                 pfn_GdipSetPenEndCap(check_p, 2);   // LineCapRound
                 pfn_GdipSetPenLineJoin(check_p, 2); // LineJoinRound
-                pfn_GdipDrawLine(g, check_p, (float)(cx - 12), (float)(cy + 1), (float)(cx - 2), (float)(cy + 10));
-                pfn_GdipDrawLine(g, check_p, (float)(cx - 2), (float)(cy + 10), (float)(cx + 14), (float)(cy - 9));
+                pfn_GdipDrawLine(g, check_p, (float)cx - 12.0f * scale, (float)cy + 1.0f * scale,
+                                            (float)cx - 2.0f * scale, (float)cy + 10.0f * scale);
+                pfn_GdipDrawLine(g, check_p, (float)cx - 2.0f * scale, (float)cy + 10.0f * scale,
+                                            (float)cx + 14.0f * scale, (float)cy - 9.0f * scale);
                 pfn_GdipDeletePen(check_p);
             }
 
@@ -2435,17 +2625,27 @@ static void draw_shield(HDC dc, int cx, int cy) {
     // Fallback if GDI+ unavailable
     COLORREF accent = g_vpn_active ? green : teal;
     COLORREF ring = g_vpn_active ? RGB(206,239,226) : RGB(211,231,248);
+    int r_out_i = (int)(82 * scale);
+    int r_in_i  = (int)(64 * scale);
     HPEN pen = CreatePen(PS_SOLID, 2, ring), old = (HPEN)SelectObject(dc, pen);
     HGDIOBJ oldbrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Ellipse(dc, cx - 82, cy - 82, cx + 82, cy + 82);
-    Ellipse(dc, cx - 64, cy - 64, cx + 64, cy + 64);
+    Ellipse(dc, cx - r_out_i, cy - r_out_i, cx + r_out_i, cy + r_out_i);
+    Ellipse(dc, cx - r_in_i, cy - r_in_i, cx + r_in_i, cy + r_in_i);
     SelectObject(dc, oldbrush); SelectObject(dc, old); DeleteObject(pen);
 
     double a = (double)(g_anim_phase % 360) * 3.141592653589793 / 180.0;
-    int px = cx + (int)(cos(a) * 72.0), py = cy + (int)(sin(a) * 72.0);
-    dot(dc, px - 5, py - 5, 10, accent);
+    int r_orb_i = (int)(72 * scale);
+    int px = cx + (int)(cos(a) * r_orb_i), py = cy + (int)(sin(a) * r_orb_i);
+    dot(dc, px - 4, py - 4, (int)(8 * scale), accent);
 
-    POINT p[6] = {{cx, cy - 34}, {cx + 27, cy - 23}, {cx + 24, cy + 12}, {cx, cy + 36}, {cx - 24, cy + 12}, {cx - 27, cy - 23}};
+    POINT p[6] = {
+        {cx, cy - (int)(34 * scale)},
+        {cx + (int)(27 * scale), cy - (int)(23 * scale)},
+        {cx + (int)(24 * scale), cy + (int)(12 * scale)},
+        {cx, cy + (int)(36 * scale)},
+        {cx - (int)(24 * scale), cy + (int)(12 * scale)},
+        {cx - (int)(27 * scale), cy - (int)(23 * scale)}
+    };
     HBRUSH fill = CreateSolidBrush(g_vpn_active ? RGB(226,247,239) : pale_blue);
     HPEN edge = CreatePen(PS_SOLID, 2, accent);
     HGDIOBJ ob = SelectObject(dc, fill), op = SelectObject(dc, edge);
@@ -2453,8 +2653,10 @@ static void draw_shield(HDC dc, int cx, int cy) {
     SelectObject(dc, ob); SelectObject(dc, op);
     DeleteObject(fill); DeleteObject(edge);
 
-    HPEN check = CreatePen(PS_SOLID, 3, accent); old = (HPEN)SelectObject(dc, check);
-    MoveToEx(dc, cx - 11, cy, NULL); LineTo(dc, cx - 2, cy + 9); LineTo(dc, cx + 14, cy - 10);
+    HPEN check = CreatePen(PS_SOLID, (int)(3 * scale), accent); old = (HPEN)SelectObject(dc, check);
+    MoveToEx(dc, cx - (int)(11 * scale), cy, NULL);
+    LineTo(dc, cx - (int)(2 * scale), cy + (int)(9 * scale));
+    LineTo(dc, cx + (int)(14 * scale), cy - (int)(10 * scale));
     SelectObject(dc, old); DeleteObject(check);
 }
 
@@ -3047,10 +3249,678 @@ static void draw_toggle_col(HDC dc, int x, int y, int sw_x, int enabled, const w
     text(dc, x, y + 20, desc, muted, g_small);
     int sw_y = y + 2;
     COLORREF sw_bg = enabled ? green : RGB(203, 213, 225);
-    rect(dc, sw_x, sw_y, 48, 24, sw_bg, 12);
-    int thumb_x = enabled ? (sw_x + 26) : (sw_x + 2);
-    rect(dc, thumb_x, sw_y + 2, 20, 20, RGB(255, 255, 255), 10);
-    text(dc, sw_x + 56, sw_y + 5, enabled ? LTXT(L"ATTIVO", L"ACTIVE") : LTXT(L"OFF", L"OFF"), enabled ? green : muted, g_caption);
+    rect(dc, sw_x, sw_y, 44, 22, sw_bg, 11);
+    int thumb_x = enabled ? (sw_x + 24) : (sw_x + 2);
+    rect(dc, thumb_x, sw_y + 2, 18, 18, RGB(255, 255, 255), 9);
+    text(dc, sw_x + 50, sw_y + 4, enabled ? LTXT(L"ATTIVO", L"ACTIVE") : LTXT(L"OFF", L"OFF"), enabled ? green : muted, g_caption);
+}
+
+static const wchar_t *g_tos_legal_text =
+    L"================================================================================\r\n"
+    L" AURELIA SYSTEM VPN & TOR PRIVACY SUITE\r\n"
+    L" Terms of Service, Acceptable Use Policy & Privacy Disclosure\r\n"
+    L" Version 1.1.0 · Open-Source License: GNU AGPL-3.0\r\n"
+    L"================================================================================\r\n\r\n"
+    L"1. PURPOSE & ARCHITECTURAL FOUNDATION\r\n"
+    L"Aurelia is a 100% free, non-commercial, open-source privacy enhancement\r\n"
+    L"application licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).\r\n"
+    L"Aurelia was developed to strengthen digital privacy, combat mass surveillance,\r\n"
+    L"and prevent ISP tracking by routing system-wide TCP traffic through the\r\n"
+    L"decentralized Tor (The Onion Router) network via a native Wintun kernel adapter.\r\n\r\n"
+    L"2. AURELIA IS NOT A COMMERCIAL VPN SERVICE\r\n"
+    L"Please understand the fundamental differences between Aurelia and commercial VPNs:\r\n"
+    L" - ZERO Centralized Servers: Aurelia owns, operates, and leases no proxy servers,\r\n"
+    L"   VPN gateways, or commercial data center hardware.\r\n"
+    L" - ZERO Subscription or User Fees: Aurelia is completely free and non-commercial.\r\n"
+    L"   No user accounts, subscriptions, emails, or payments are ever requested.\r\n"
+    L" - Decentralized Multi-Hop Routing: Your traffic is not routed to a single VPN host.\r\n"
+    L"   Instead, it is routed through three independent, volunteer-operated nodes in the\r\n"
+    L"   global Tor network (Guard -> Middle -> Exit Relay) with layered onion encryption.\r\n\r\n"
+    L"3. ZERO-LOGGING & EPHEMERAL IN-RAM ARCHITECTURE\r\n"
+    L"Aurelia is engineered with strict fail-closed, memory-only security principles:\r\n"
+    L" - ZERO Logs: Aurelia does not record, collect, store, or transmit any connection logs,\r\n"
+    L"   browsing history, source/destination IP addresses, traffic metadata, or timestamps.\r\n"
+    L" - Pure In-RAM State: All Tor routing descriptors and consensus caches are held\r\n"
+    L"   exclusively in volatile RAM (AvoidDiskWrites enabled). No state is written to disk,\r\n"
+    L"   eliminating forensic disk traces and preventing SSD wear.\r\n"
+    L" - Anti-Leak Kernel Shield: A Windows Filtering Platform (WFP) driver acts as a\r\n"
+    L"   fail-closed kill switch, blocking WebRTC, STUN, IPv6, and LAN broadcast leaks.\r\n\r\n"
+    L"4. USER RESPONSIBILITY & ACCEPTABLE USE POLICY\r\n"
+    L"Aurelia is provided strictly for lawful privacy protection, anti-censorship,\r\n"
+    L"journalistic security, freedom of expression, and authorized penetration testing.\r\n"
+    L"By using Aurelia, you explicitly acknowledge and agree:\r\n"
+    L" - You are solely and exclusively legally responsible for all actions, transmissions,\r\n"
+    L"   and communications originating from your device while using this software.\r\n"
+    L" - You will NOT use Aurelia for any unlawful purpose, including but not limited to\r\n"
+    L"   unauthorized network intrusions, distribution of malicious code, denial of service,\r\n"
+    L"   financial fraud, copyright violations, or harassment.\r\n"
+    L" - You will comply with all local, federal, and international laws applicable to your\r\n"
+    L"   jurisdiction and the destination endpoints.\r\n\r\n"
+    L"5. TOR NETWORK NATURE & ENCRYPTION ADVISORY\r\n"
+    L" - Multi-hop anonymity conceals your origin IP and ISP identity. However, exit nodes\r\n"
+    L"   bridge traffic to the public Internet. You must always ensure end-to-end HTTPS/TLS\r\n"
+    L"   encryption when transmitting sensitive personal credentials or data.\r\n"
+    L" - Multi-hop routing introduces inherent latency compared to direct ISP connections.\r\n\r\n"
+    L"6. DISCLAIMER OF WARRANTIES & LIMITATION OF LIABILITY\r\n"
+    L"AURELIA IS PROVIDED \"AS IS\" AND \"AS AVAILABLE\", WITHOUT WARRANTY OF ANY KIND,\r\n"
+    L"EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY,\r\n"
+    L"FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.\r\n"
+    L"IN NO EVENT SHALL THE DEVELOPERS, CONTRIBUTORS, OR COPYRIGHT HOLDERS BE LIABLE\r\n"
+    L"FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES\r\n"
+    L"(INCLUDING LOSS OF USE, DATA, OR PROFITS) ARISING OUT OF THE USE OR INABILITY TO\r\n"
+    L"USE THIS SOFTWARE, REGARDLESS OF THE LEGAL THEORY ASSERTED.\r\n\r\n"
+    L"By clicking 'Accept & Continue', you confirm that you have read, understood, and\r\n"
+    L"agree to be bound by these Terms of Service.\r\n";
+
+static int g_tos_dialog_open = 0;
+static int g_tos_accepted = 0;
+static int g_tos_review_only = 0;
+static HWND g_tos_dialog = NULL;
+
+static int is_tos_accepted(void) {
+    if(!g_settings_path[0]) return 0;
+    return GetPrivateProfileIntW(L"Legal", L"TosAccepted", 0, g_settings_path) == 1;
+}
+
+static void set_tos_accepted(int accepted) {
+    if(!g_settings_path[0]) return;
+    WritePrivateProfileStringW(L"Legal", L"TosAccepted", accepted ? L"1" : L"0", g_settings_path);
+}
+
+static LRESULT CALLBACK tos_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch(msg) {
+    case WM_CREATE: {
+        HFONT font_edit = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HWND hedit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_tos_legal_text,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            24, 76, 688, 436, hwnd, (HMENU)1001, g_instance, NULL);
+        if(hedit && font_edit) SendMessageW(hedit, WM_SETFONT, (WPARAM)font_edit, TRUE);
+
+        if(g_tos_review_only) {
+            CreateWindowExW(0, L"BUTTON", LTXT(L"Chiudi", L"Close"),
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 548, 524, 164, 40, hwnd, (HMENU)ID_TOS_CLOSE, g_instance, NULL);
+        } else {
+            CreateWindowExW(0, L"BUTTON", LTXT(L"Rifiuta ed Esci", L"Decline & Exit"),
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 356, 524, 164, 40, hwnd, (HMENU)ID_TOS_DECLINE, g_instance, NULL);
+            CreateWindowExW(0, L"BUTTON", LTXT(L"Accetta e Continua", L"Accept & Continue"),
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 532, 524, 180, 40, hwnd, (HMENU)ID_TOS_ACCEPT, g_instance, NULL);
+        }
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT cr; GetClientRect(hwnd, &cr);
+        int w = cr.right - cr.left, h = cr.bottom - cr.top;
+        HDC dc = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+        HGDIOBJ oldbmp = SelectObject(dc, bmp);
+
+        HBRUSH b = CreateSolidBrush(bg); FillRect(dc, &cr, b); DeleteObject(b);
+
+        draw_header_logo(dc, 46, 36);
+        text(dc, 78, 16, LTXT(L"Termini di Servizio & Informativa Legale", L"Terms of Service & Legal Disclosure"), white, g_heading);
+        text(dc, 80, 48, LTXT(L"Open-Source AGPL-3.0 · Architettura In-RAM · Rete Decentralizzata Tor",
+                             L"Open-Source AGPL-3.0 · Ephemeral In-RAM Architecture · Tor Onion Routing"), muted, g_caption);
+        rule(dc, 24, 68, w - 48);
+
+        if(!g_tos_review_only) {
+            text(dc, 24, 534, LTXT(L"Aurelia è uno strumento libero per la tutela della privacy (AGPL-3.0).",
+                                  L"Aurelia is a free privacy tool for lawful preservation of rights (AGPL-3.0)."), muted, g_caption);
+        }
+
+        BitBlt(hdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, oldbmp); DeleteObject(bmp); DeleteDC(dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *d = (DRAWITEMSTRUCT*)lp;
+        int id = (int)d->CtlID;
+        HDC dc = d->hDC;
+        RECT r = d->rcItem;
+        BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
+
+        COLORREF c_bg, c_border, c_text;
+        if(id == ID_TOS_ACCEPT) {
+            c_bg = pressed ? RGB(0, 110, 80) : green;
+            c_border = c_bg;
+            c_text = RGB(255, 255, 255);
+        } else if(id == ID_TOS_CLOSE) {
+            c_bg = pressed ? RGB(0, 95, 175) : RGB(0, 114, 206);
+            c_border = c_bg;
+            c_text = RGB(255, 255, 255);
+        } else {
+            c_bg = pressed ? RGB(245, 230, 230) : RGB(255, 255, 255);
+            c_border = pressed ? RGB(215, 50, 65) : RGB(220, 200, 200);
+            c_text = RGB(200, 40, 50);
+        }
+
+        rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, c_bg, 8);
+        HPEN p = CreatePen(PS_SOLID, 1, c_border), op = (HPEN)SelectObject(dc, p);
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, r.left, r.top, r.right, r.bottom, 8, 8);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, c_text);
+        HFONT old = (HFONT)SelectObject(dc, (id == ID_TOS_ACCEPT || id == ID_TOS_CLOSE) ? (g_font_bold ? g_font_bold : g_font) : g_font);
+        wchar_t s[64];
+        GetWindowTextW(d->hwndItem, s, 64);
+        DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if(id == ID_TOS_ACCEPT) {
+            g_tos_accepted = 1;
+            g_tos_dialog_open = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if(id == ID_TOS_DECLINE) {
+            g_tos_accepted = 0;
+            g_tos_dialog_open = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if(id == ID_TOS_CLOSE) {
+            g_tos_accepted = 1;
+            g_tos_dialog_open = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        g_tos_accepted = g_tos_review_only ? 1 : 0;
+        g_tos_dialog_open = 0;
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_tos_dialog = NULL;
+        g_tos_dialog_open = 0;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static int show_tos_dialog(HINSTANCE inst, HWND parent, int review_only) {
+    g_tos_review_only = review_only;
+    g_tos_accepted = 0;
+    g_tos_dialog_open = 1;
+
+    int dw = 750, dh = 610;
+    int dx, dy;
+    if(parent) {
+        RECT pr; GetWindowRect(parent, &pr);
+        dx = pr.left + (pr.right - pr.left - dw) / 2;
+        dy = pr.top + (pr.bottom - pr.top - dh) / 2;
+    } else {
+        dx = (GetSystemMetrics(SM_CXSCREEN) - dw) / 2;
+        dy = (GetSystemMetrics(SM_CYSCREEN) - dh) / 2;
+    }
+    if(dx < 0) dx = 0;
+    if(dy < 0) dy = 0;
+
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AureliaTosDialog",
+        review_only ? LTXT(L"Aurelia · Termini di Servizio & Informativa Legale", L"Aurelia · Terms of Service & Legal Disclosure")
+                    : LTXT(L"Aurelia · Accordo di Licenza & Termini di Servizio", L"Aurelia · License Agreement & Terms of Service"),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_CLIPCHILDREN,
+        dx, dy, dw, dh, parent, NULL, inst, NULL);
+    if(!hwnd) return 0;
+
+    g_tos_dialog = hwnd;
+    if(parent) EnableWindow(parent, FALSE);
+
+    MSG msg;
+    while(g_tos_dialog_open && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+        if(!IsWindow(hwnd)) break;
+    }
+
+    if(parent) {
+        EnableWindow(parent, TRUE);
+        SetForegroundWindow(parent);
+    }
+    return g_tos_accepted;
+}
+
+static int parse_version_part(const wchar_t **p) {
+    int v = 0;
+    while(**p && !iswdigit(**p)) (*p)++;
+    while(iswdigit(**p)) {
+        v = v * 10 + (**p - L'0');
+        (*p)++;
+    }
+    if(**p == L'.') (*p)++;
+    return v;
+}
+
+static int compare_version_strings(const wchar_t *v1, const wchar_t *v2) {
+    const wchar_t *p1 = v1, *p2 = v2;
+    while(*p1 || *p2) {
+        int n1 = parse_version_part(&p1);
+        int n2 = parse_version_part(&p2);
+        if(n1 > n2) return 1;
+        if(n1 < n2) return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    int manual;
+    int available;
+    wchar_t new_version[32];
+    wchar_t download_url[256];
+    wchar_t release_title[128];
+} UpdateCheckResult;
+
+static DWORD WINAPI check_update_worker(LPVOID param) {
+    int manual = (int)(intptr_t)param;
+    UpdateCheckResult *res = (UpdateCheckResult*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(UpdateCheckResult));
+    if(!res) return 0;
+    res->manual = manual;
+
+    HINTERNET hInternet = InternetOpenW(L"Aurelia-Updater/" APP_VERSION_STR, INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if(hInternet) {
+        DWORD timeout = 7000;
+        InternetSetOptionW(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        InternetSetOptionW(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+
+        HINTERNET hUrl = InternetOpenUrlW(hInternet,
+            L"https://api.github.com/repos/mzguardit/aurelia/releases/latest",
+            L"Accept: application/vnd.github.v3+json\r\nUser-Agent: Aurelia-Updater\r\n", (DWORD)-1L,
+            INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE, 0);
+        if(hUrl) {
+            char buf[65536];
+            DWORD total_read = 0;
+            DWORD bytes_read = 0;
+            while(total_read < sizeof(buf) - 1 && InternetReadFile(hUrl, buf + total_read, sizeof(buf) - 1 - total_read, &bytes_read) && bytes_read > 0) {
+                total_read += bytes_read;
+            }
+            buf[total_read] = 0;
+
+            char *tag = strstr(buf, "\"tag_name\":");
+            if(tag) {
+                char *val = strchr(tag + 11, '\"');
+                if(val) {
+                    val++;
+                    char *end = strchr(val, '\"');
+                    if(end) {
+                        *end = 0;
+                        MultiByteToWideChar(CP_UTF8, 0, val, -1, res->new_version, _countof(res->new_version));
+                    }
+                }
+            }
+
+            char *url = strstr(buf, "\"html_url\":");
+            if(url) {
+                char *val = strchr(url + 11, '\"');
+                if(val) {
+                    val++;
+                    char *end = strchr(val, '\"');
+                    if(end) {
+                        *end = 0;
+                        MultiByteToWideChar(CP_UTF8, 0, val, -1, res->download_url, _countof(res->download_url));
+                    }
+                }
+            }
+
+            char *name = strstr(buf, "\"name\":");
+            if(name) {
+                char *val = strchr(name + 7, '\"');
+                if(val) {
+                    val++;
+                    char *end = strchr(val, '\"');
+                    if(end) {
+                        *end = 0;
+                        MultiByteToWideChar(CP_UTF8, 0, val, -1, res->release_title, _countof(res->release_title));
+                    }
+                }
+            }
+
+            if(res->new_version[0]) {
+                if(compare_version_strings(res->new_version, APP_VERSION_STR) > 0) {
+                    res->available = 1;
+                }
+            }
+
+            InternetCloseHandle(hUrl);
+        }
+        InternetCloseHandle(hInternet);
+    }
+
+    if(g_window) {
+        PostMessageW(g_window, WM_UPDATE_RESULT, (WPARAM)manual, (LPARAM)res);
+    } else {
+        HeapFree(GetProcessHeap(), 0, res);
+    }
+    return 0;
+}
+
+static void trigger_check_updates(int manual) {
+    HANDLE t = CreateThread(NULL, 0, check_update_worker, (LPVOID)(intptr_t)manual, 0, NULL);
+    if(t) CloseHandle(t);
+}
+
+static HWND g_about_dialog = NULL;
+
+static void paint_about_dc(HDC dc, int w, int h) {
+    RECT cr = {0, 0, w, h};
+    HBRUSH bg_b = CreateSolidBrush(bg);
+    FillRect(dc, &cr, bg_b);
+    DeleteObject(bg_b);
+
+    card(dc, 20, 16, w - 40, 310);
+
+    draw_header_logo(dc, 64, 58);
+    text(dc, 104, 36, L"Aurelia", white, g_heading);
+    text(dc, 106, 72, LTXT(L"VPN DI SISTEMA  ·  RETE TOR", L"SYSTEM VPN  ·  TOR NETWORK"), muted, g_caption);
+
+    wchar_t ver_str[64];
+    _snwprintf_s(ver_str, _countof(ver_str), _TRUNCATE, L"Version %s (Release 2026 · 64-bit C-Native)", APP_VERSION_STR);
+    chip(dc, w - 310, 42, 270, 32, ver_str, green, pale_green);
+
+    rule(dc, 40, 98, w - 80);
+
+    text(dc, 40, 114, LTXT(L"INFORMAZIONI SU AURELIA", L"ABOUT AURELIA"), muted, g_caption);
+    text(dc, 40, 136, LTXT(L"Aurelia è una VPN di sistema open-source basata sulla rete Tor.",
+                           L"Aurelia is a modern, high-performance Tor-powered system VPN."), white, g_font_bold ? g_font_bold : g_font);
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, muted);
+    HFONT old_f = (HFONT)SelectObject(dc, g_small);
+
+    RECT r_desc1 = {40, 162, w - 50, 184};
+    DrawTextW(dc, LTXT(L"Instrada l'intero traffico TCP attraverso circuiti crittografati a 3 salti con driver Wintun nativo.",
+                       L"Routes system-wide TCP traffic through encrypted 3-hop circuits using a native Wintun driver."),
+              -1, &r_desc1, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+
+    RECT r_desc2 = {40, 186, w - 50, 208};
+    DrawTextW(dc, LTXT(L"Include Kill Switch Windows fail-closed (WFP), Anti-DNS Leak, WebRTC Shield e Stream Isolation.",
+                       L"Features fail-closed Windows WFP kill switch, anti-DNS leak, WebRTC shield, and stream isolation."),
+              -1, &r_desc2, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+
+    SelectObject(dc, old_f);
+
+    rule(dc, 40, 218, w - 80);
+
+    text(dc, 40, 232, LTXT(L"COPYRIGHT & LICENZA", L"COPYRIGHT & LICENSE"), muted, g_caption);
+    text(dc, 40, 252, L"Copyright \u00A9 2026 softedition.com · All rights reserved", white, g_font_bold ? g_font_bold : g_font);
+
+    RECT r_lic = {40, 276, w - 50, 300};
+    SetTextColor(dc, muted);
+    HFONT old_f2 = (HFONT)SelectObject(dc, g_small);
+    DrawTextW(dc, L"Licensed under GNU Affero General Public License v3.0 (AGPL-3.0) · 100% Free & Open-Source",
+              -1, &r_lic, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(dc, old_f2);
+}
+
+static LRESULT CALLBACK about_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch(msg) {
+    case WM_CREATE: {
+        int bw1 = 170, bw2 = 140, bw3 = 135, bw4 = 95;
+        int gap = 10;
+        int total_b = bw1 + bw2 + bw3 + bw4 + 3 * gap;
+        int sx = (644 - total_b) / 2;
+        if(sx < 20) sx = 20;
+
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Verifica Aggiornamenti", L"Check for Updates"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, sx, 342, bw1, 36, hwnd, (HMENU)ID_ABOUT_CHECK_UPDATE, g_instance, NULL);
+        CreateWindowExW(0, L"BUTTON", L"softedition.com",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, sx + bw1 + gap, 342, bw2, 36, hwnd, (HMENU)ID_ABOUT_VISIT_SITE, g_instance, NULL);
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Termini (ToS)", L"Terms of Service"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, sx + bw1 + gap + bw2 + gap, 342, bw3, 36, hwnd, (HMENU)ID_ABOUT_VIEW_TOS, g_instance, NULL);
+        CreateWindowExW(0, L"BUTTON", LTXT(L"Chiudi", L"Close"),
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, sx + bw1 + gap + bw2 + gap + bw3 + gap, 342, bw4, 36, hwnd, (HMENU)ID_ABOUT_CLOSE, g_instance, NULL);
+        return 0;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT cr; GetClientRect(hwnd, &cr);
+        int w = cr.right - cr.left, h = cr.bottom - cr.top;
+
+        HDC dc = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+        HGDIOBJ oldbmp = SelectObject(dc, bmp);
+
+        paint_about_dc(dc, w, h);
+
+        BitBlt(hdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, oldbmp);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *d = (DRAWITEMSTRUCT*)lp;
+        int id = (int)d->CtlID;
+        HDC dc = d->hDC;
+        RECT r = d->rcItem;
+        BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
+
+        COLORREF c_bg, c_border, c_text;
+        if(id == ID_ABOUT_CHECK_UPDATE) {
+            c_bg = pressed ? RGB(0, 95, 175) : RGB(0, 114, 206);
+            c_border = c_bg;
+            c_text = RGB(255, 255, 255);
+        } else if(id == ID_ABOUT_VISIT_SITE) {
+            c_bg = pressed ? RGB(220, 252, 231) : RGB(240, 253, 244);
+            c_border = green;
+            c_text = green;
+        } else if(id == ID_ABOUT_VIEW_TOS) {
+            c_bg = pressed ? RGB(225, 240, 255) : RGB(235, 245, 255);
+            c_border = pressed ? teal : RGB(190, 215, 240);
+            c_text = teal;
+        } else {
+            c_bg = pressed ? RGB(225, 230, 235) : RGB(255, 255, 255);
+            c_border = pressed ? muted : RGB(210, 218, 228);
+            c_text = white;
+        }
+
+        rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, c_bg, 8);
+        HPEN p = CreatePen(PS_SOLID, 1, c_border), op = (HPEN)SelectObject(dc, p);
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, r.left, r.top, r.right, r.bottom, 8, 8);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, c_text);
+        HFONT old = (HFONT)SelectObject(dc, (id == ID_ABOUT_CHECK_UPDATE && g_font_bold) ? g_font_bold : g_font);
+        wchar_t s[64];
+        GetWindowTextW(d->hwndItem, s, 64);
+        DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if(id == ID_ABOUT_CHECK_UPDATE) {
+            trigger_check_updates(1);
+            return 0;
+        }
+        if(id == ID_ABOUT_VISIT_SITE) {
+            ShellExecuteW(NULL, L"open", L"https://softedition.com", NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+        if(id == ID_ABOUT_VIEW_TOS) {
+            show_tos_dialog(g_instance, hwnd, 1);
+            return 0;
+        }
+        if(id == ID_ABOUT_CLOSE) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_KEYDOWN:
+        if(wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_about_dialog = NULL;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void open_about_dialog(HWND parent) {
+    if(g_about_dialog) {
+        SetForegroundWindow(g_about_dialog);
+        return;
+    }
+    int dw = 660, dh = 434;
+    int dx, dy;
+    if(parent) {
+        RECT pr; GetWindowRect(parent, &pr);
+        dx = pr.left + (pr.right - pr.left - dw) / 2;
+        dy = pr.top + (pr.bottom - pr.top - dh) / 2;
+    } else {
+        dx = (GetSystemMetrics(SM_CXSCREEN) - dw) / 2;
+        dy = (GetSystemMetrics(SM_CYSCREEN) - dh) / 2;
+    }
+    if(dx < 0) dx = 0;
+    if(dy < 0) dy = 0;
+
+    g_about_dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AureliaAboutDialog",
+        LTXT(L"Aurelia · Informazioni & SoftEdition", L"Aurelia · About & SoftEdition"),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_CLIPCHILDREN,
+        dx, dy, dw, dh, parent, NULL, g_instance, NULL);
+}
+
+typedef struct {
+    int w, h;
+    int mx;
+    int content_w;
+    int col1_x, col1_w;
+    int col2_x, col2_w;
+    int gap_x;
+    int row1_y, row1_h;
+    int row2_y, row2_h;
+    int gap_y;
+    int shield_cx, shield_cy;
+    float shield_scale;
+    int tab_w;
+    int tab_xs[3];
+} LayoutMetrics;
+
+static void get_layout_metrics(int w, int h, LayoutMetrics *m) {
+    if(!m) return;
+    m->w = w;
+    m->h = h;
+
+    if(w >= 1144) {
+        m->content_w = 1096;
+        m->mx = (w - m->content_w) / 2;
+    } else {
+        m->mx = 18;
+        m->content_w = w - 2 * m->mx;
+        if(m->content_w < 880) m->content_w = 880;
+    }
+
+    m->tab_w = (m->content_w - 16) / 3;
+    m->tab_xs[0] = m->mx + 4;
+    m->tab_xs[1] = m->mx + 4 + m->tab_w + 4;
+    m->tab_xs[2] = m->mx + 4 + (m->tab_w + 4) * 2;
+
+    m->gap_x = 16;
+    m->col2_w = (m->content_w * 34) / 100;
+    if(m->col2_w < 330) m->col2_w = 330;
+    if(m->col2_w > 368) m->col2_w = 368;
+    m->col1_w = m->content_w - m->gap_x - m->col2_w;
+    m->col1_x = m->mx;
+    m->col2_x = m->mx + m->col1_w + m->gap_x;
+
+    m->row1_y = 144;
+    m->gap_y = 14;
+    int avail_h = h - m->row1_y - 18;
+    if(avail_h < 490) avail_h = 490;
+
+    m->row1_h = (avail_h - m->gap_y) * 55 / 100;
+    if(m->row1_h > 330) m->row1_h = 330;
+    if(m->row1_h < 270) m->row1_h = 270;
+
+    m->row2_y = m->row1_y + m->row1_h + m->gap_y;
+    m->row2_h = avail_h - m->row1_h - m->gap_y;
+    if(m->row2_h > 268) m->row2_h = 268;
+    if(m->row2_h < 210) m->row2_h = 210;
+
+    if(m->col1_w >= 700) {
+        m->shield_scale = 1.0f;
+        m->shield_cx = m->col1_x + m->col1_w - 138;
+    } else {
+        float factor = (float)(m->col1_w - 570) / (700.0f - 570.0f);
+        if(factor < 0.0f) factor = 0.0f;
+        if(factor > 1.0f) factor = 1.0f;
+        m->shield_scale = 0.68f + 0.32f * factor;
+        int margin_from_right = (int)(84.0f * m->shield_scale + 22.0f);
+        m->shield_cx = m->col1_x + m->col1_w - margin_from_right;
+    }
+    m->shield_cy = m->row1_y + 104;
+}
+
+static void reposition_controls(HWND hwnd, int w, int h) {
+    (void)hwnd;
+    LayoutMetrics m;
+    get_layout_metrics(w, h, &m);
+
+    // Header buttons
+    int chip_x = m.mx + m.content_w - 168;
+    int lang_x = chip_x - 12 - 104;
+    if(g_language) MoveWindow(g_language, lang_x, 24, 104, 36, TRUE);
+    int about_x = lang_x - 10 - 76;
+    if(g_btn_about) MoveWindow(g_btn_about, about_x, 24, 76, 36, TRUE);
+
+    // Tab 0: Tunnel
+    int btn_gap = 10;
+    int btn_w = (m.col1_w - 56 - 2 * btn_gap) / 3;
+    int btn_h = (m.row1_h < 300) ? 42 : 46;
+    int btn_y = m.row1_y + m.row1_h - 18 - btn_h;
+    if(g_connect) MoveWindow(g_connect, m.col1_x + 28, btn_y, btn_w, btn_h, TRUE);
+    if(g_rotate) MoveWindow(g_rotate, m.col1_x + 28 + btn_w + btn_gap, btn_y, btn_w, btn_h, TRUE);
+    if(g_audit) MoveWindow(g_audit, m.col1_x + 28 + (btn_w + btn_gap) * 2, btn_y, btn_w, btn_h, TRUE);
+
+    int country_w = m.col2_w - 56;
+    int rot_ctrl_y1 = m.row2_y + 52;
+    if(g_country) MoveWindow(g_country, m.col2_x + 28, rot_ctrl_y1, country_w, 36, TRUE);
+
+    int scan_w = 98;
+    int interval_w = country_w - scan_w - 8;
+    int rot_ctrl_y2 = m.row2_y + 130;
+    if(g_interval) MoveWindow(g_interval, m.col2_x + 28, rot_ctrl_y2, interval_w, 34, TRUE);
+    if(g_btn_scan_nodes) MoveWindow(g_btn_scan_nodes, m.col2_x + 28 + interval_w + 8, rot_ctrl_y2, scan_w, 34, TRUE);
+
+    // Tab 2: Settings
+    int tos_w = 120;
+    int tos_x = m.mx + m.content_w - 24 - tos_w;
+    int save_w = 210;
+    int save_x = tos_x - 12 - save_w;
+    int dns_avail = save_x - 14 - (m.mx + 28);
+
+    if(g_btn_view_tos) MoveWindow(g_btn_view_tos, tos_x, 194, tos_w, 36, TRUE);
+    if(g_btn_save_settings) MoveWindow(g_btn_save_settings, save_x, 194, save_w, 36, TRUE);
+
+    if(g_setting_dns_mode == 3) {
+        int edit_w = 160;
+        int combo_w = dns_avail - edit_w - 10;
+        if(combo_w < 180) combo_w = 180;
+        if(g_dns_combo) MoveWindow(g_dns_combo, m.mx + 28, 194, combo_w, 36, TRUE);
+        if(g_dns_edit) MoveWindow(g_dns_edit, m.mx + 28 + combo_w + 10, 194, edit_w, 36, TRUE);
+    } else {
+        int combo_w = dns_avail;
+        if(combo_w > 450) combo_w = 450;
+        if(g_dns_combo) MoveWindow(g_dns_combo, m.mx + 28, 194, combo_w, 36, TRUE);
+        if(g_dns_edit) MoveWindow(g_dns_edit, m.mx + 28 + combo_w + 10, 194, 160, 36, FALSE);
+    }
 }
 
 static void switch_tab(int tab) {
@@ -3067,6 +3937,7 @@ static void switch_tab(int tab) {
     if(g_dns_combo) ShowWindow(g_dns_combo, show_settings);
     if(g_dns_edit) ShowWindow(g_dns_edit, (tab == TAB_SETTINGS && g_setting_dns_mode == 3) ? SW_SHOW : SW_HIDE);
     if(g_btn_save_settings) ShowWindow(g_btn_save_settings, show_settings);
+    if(g_btn_view_tos) ShowWindow(g_btn_view_tos, show_settings);
 
     if(g_window) InvalidateRect(g_window, NULL, TRUE);
 }
@@ -3075,62 +3946,63 @@ static void paint_dc(HDC dc, int w, int h) {
     RECT cr = {0, 0, w, h};
     HBRUSH b = CreateSolidBrush(bg); FillRect(dc, &cr, b); DeleteObject(b);
 
+    LayoutMetrics m;
+    get_layout_metrics(w, h, &m);
+
     /* header logo */
-    draw_header_logo(dc, 56, 41);
-    text(dc, 92, 18, L"Aurelia", white, g_heading);
-    text(dc, 94, 54, LTXT(L"VPN DI SISTEMA  ·  RETE TOR", L"SYSTEM VPN  ·  TOR NETWORK"), muted, g_caption);
+    draw_header_logo(dc, m.mx + 20, 41);
+    text(dc, m.mx + 56, 18, L"Aurelia", white, g_heading);
+    text(dc, m.mx + 58, 54, LTXT(L"VPN DI SISTEMA  ·  RETE TOR", L"SYSTEM VPN  ·  TOR NETWORK"), muted, g_caption);
 
     const wchar_t *state = g_starting ? LTXT(L"CONNESSIONE…", L"CONNECTING…") :
                            (g_vpn_active ? (g_attestation.killswitch_passed ? LTXT(L"VERIFICATO: 0 LEAK", L"VERIFIED: 0 LEAKS") : LTXT(L"PROTEZIONE ATTIVA", L"PROTECTED")) :
                            LTXT(L"DISCONNESSO", L"DISCONNECTED"));
-    chip(dc, 960, 26, 168, 36, state,
+    chip(dc, m.mx + m.content_w - 168, 24, 168, 36, state,
         g_vpn_active ? green : (g_starting ? RGB(190, 115, 20) : muted),
         g_vpn_active ? pale_green : (g_starting ? pale_amber : RGB(235, 239, 244)));
-    rule(dc, 32, 82, 1096);
+    rule(dc, m.mx, 82, m.content_w);
 
     /* Tab Bar: y = 90 to 134 */
-    rect(dc, 32, 90, 1096, 44, RGB(236, 241, 247), 12);
+    rect(dc, m.mx, 90, m.content_w, 44, RGB(236, 241, 247), 12);
     const wchar_t *tab_names[3] = {
         LTXT(L"Tunnel & Circuito", L"Tunnel & Circuit"),
         LTXT(L"Speed & Monitor", L"Speed & Monitor"),
         LTXT(L"Impostazioni & DNS", L"Settings & DNS")
     };
-    int tab_w = 360;
-    int tab_xs[3] = {36, 400, 764};
     for(int i = 0; i < 3; i++) {
-        RECT tr = {tab_xs[i], 94, tab_xs[i] + tab_w, 94 + 36};
+        RECT tr = {m.tab_xs[i], 94, m.tab_xs[i] + m.tab_w, 94 + 36};
         if(i == g_active_tab) {
-            rect(dc, tab_xs[i], 94, tab_w, 36, panel, 10);
+            rect(dc, m.tab_xs[i], 94, m.tab_w, 36, panel, 10);
             HPEN p = CreatePen(PS_SOLID, 1, line), op = (HPEN)SelectObject(dc, p);
             HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-            RoundRect(dc, tab_xs[i], 94, tab_xs[i] + tab_w, 94 + 36, 10, 10);
+            RoundRect(dc, m.tab_xs[i], 94, m.tab_xs[i] + m.tab_w, 94 + 36, 10, 10);
             SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
 
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, teal);
             HFONT old = (HFONT)SelectObject(dc, g_font_bold ? g_font_bold : g_font);
-            DrawTextW(dc, tab_names[i], -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, tab_names[i], -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
         } else {
             if(i == g_tab_hover) {
-                rect(dc, tab_xs[i], 94, tab_w, 36, RGB(244, 247, 252), 10);
+                rect(dc, m.tab_xs[i], 94, m.tab_w, 36, RGB(244, 247, 252), 10);
             }
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, muted);
             HFONT old = (HFONT)SelectObject(dc, g_font);
-            DrawTextW(dc, tab_names[i], -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dc, tab_names[i], -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, old);
         }
     }
 
     if(g_active_tab == TAB_TUNNEL) {
         /* primary connection panel */
-        card(dc, 32, 146, 708, 330);
-        text(dc, 60, 168, LTXT(L"PANORAMICA", L"OVERVIEW"), muted, g_caption);
-        text(dc, 60, 196, g_vpn_active ? LTXT(L"Connesso alla rete Tor", L"Connected to Tor") :
+        card(dc, m.col1_x, m.row1_y, m.col1_w, m.row1_h);
+        text(dc, m.col1_x + 28, m.row1_y + 18, LTXT(L"PANORAMICA", L"OVERVIEW"), muted, g_caption);
+        text(dc, m.col1_x + 28, m.row1_y + 42, g_vpn_active ? LTXT(L"Connesso alla rete Tor", L"Connected to Tor") :
             (g_starting ? LTXT(L"Connessione in corso…", L"Connecting to Tor…") :
             LTXT(L"La tua privacy, sotto controllo", L"Your privacy, in control")), white, g_heading);
-        text(dc, 60, 238, g_vpn_active ? LTXT(L"Il traffico TCP del sistema passa nel tunnel protetto Wintun.", L"System TCP traffic is routed through the protected Wintun tunnel.") :
+        text(dc, m.col1_x + 28, m.row1_y + 76, g_vpn_active ? LTXT(L"Il traffico TCP del sistema passa nel tunnel protetto Wintun.", L"System TCP traffic is routed through the protected Wintun tunnel.") :
             (g_starting ? LTXT(L"Avvio del circuito e verifica delle protezioni…", L"Starting the circuit and checking protection…") :
             LTXT(L"Instrada tutto il traffico del sistema attraverso la rete Tor in sicurezza.", L"Route system TCP traffic through the Tor network securely.")), muted, g_font);
         wchar_t attest_str[160];
@@ -3143,30 +4015,39 @@ static void paint_dc(HDC dc, int w, int h) {
             wcscpy_s(attest_str, _countof(attest_str),
                 g_vpn_active ? LTXT(L"Tunnel cifrato attivo · Kill switch fail-closed armato", L"Encrypted tunnel active · Fail-closed kill switch armed") : g_tor_info);
         }
-        text(dc, 60, 268, attest_str, muted, g_small);
+        text(dc, m.col1_x + 28, m.row1_y + 102, attest_str, muted, g_small);
 
-        text(dc, 60, 320, LTXT(L"IP PUBBLICO TOR", L"TOR EXIT IP"), muted, g_caption);
-        text(dc, 60, 344, g_vpn_active ? g_exit_public_ip : L"—", white, g_font_bold ? g_font_bold : g_font);
+        int btn_h = (m.row1_h < 300) ? 42 : 46;
+        int btn_y = m.row1_y + m.row1_h - 18 - btn_h;
+        int info_y = btn_y - 58;
+        if(info_y < m.row1_y + 130) info_y = m.row1_y + 130;
 
-        text(dc, 318, 320, LTXT(L"PAESE DI USCITA EFFETTIVO", L"ACTUAL EXIT COUNTRY"), muted, g_caption);
-        draw_flag_code(dc, 318, 338, g_exit_public_country);
-        text(dc, 358, 344, g_vpn_active ? country_name(g_exit_public_country) : L"—", white, g_font_bold ? g_font_bold : g_font);
+        text(dc, m.col1_x + 28, info_y, LTXT(L"IP PUBBLICO TOR", L"TOR EXIT IP"), muted, g_caption);
+        text(dc, m.col1_x + 28, info_y + 22, g_vpn_active ? g_exit_public_ip : L"—", white, g_font_bold ? g_font_bold : g_font);
 
-        draw_shield(dc, 644, 290);
+        int country_x = m.col1_x + (m.col1_w * 38) / 100;
+        text(dc, country_x, info_y, LTXT(L"PAESE DI USCITA EFFETTIVO", L"ACTUAL EXIT COUNTRY"), muted, g_caption);
+        draw_flag_code(dc, country_x, info_y + 18, g_exit_public_country);
+        text(dc, country_x + 40, info_y + 22, g_vpn_active ? country_name(g_exit_public_country) : L"—", white, g_font_bold ? g_font_bold : g_font);
+
+        draw_shield(dc, m.shield_cx, m.shield_cy, m.shield_scale);
 
         /* protection panel */
-        card(dc, 760, 146, 368, 330);
-        text(dc, 788, 168, LTXT(L"PROTEZIONE", L"PROTECTION"), muted, g_caption);
-        text(dc, 788, 196, LTXT(L"Sicurezza della rete", L"Network security"), white, g_heading);
+        card(dc, m.col2_x, m.row1_y, m.col2_w, m.row1_h);
+        text(dc, m.col2_x + 28, m.row1_y + 18, LTXT(L"PROTEZIONE", L"PROTECTION"), muted, g_caption);
+        text(dc, m.col2_x + 28, m.row1_y + 42, LTXT(L"Sicurezza della rete", L"Network security"), white, g_heading);
 
-        dot(dc, 790, 243, 10, g_vpn_active ? green : teal);
-        text(dc, 812, 239, L"Kill switch", white, g_font);
-        chip(dc, 975, 232, 124, 29, g_vpn_active ? LTXT(L"ATTIVO", L"ACTIVE") : LTXT(L"PRONTO", L"READY"),
+        int item1_y = m.row1_y + 76;
+        dot(dc, m.col2_x + 28, item1_y + 4, 10, g_vpn_active ? green : teal);
+        text(dc, m.col2_x + 50, item1_y, L"Kill switch", white, g_font);
+        chip(dc, m.col2_x + m.col2_w - 28 - 92, item1_y - 4, 92, 28, g_vpn_active ? LTXT(L"ATTIVO", L"ACTIVE") : LTXT(L"PRONTO", L"READY"),
             g_vpn_active ? green : teal, g_vpn_active ? pale_green : pale_blue);
 
-        rule(dc, 788, 276, 312);
-        dot(dc, 790, 295, 10, g_vpn_active ? green : RGB(171, 109, 0));
-        text(dc, 812, 291, LTXT(L"Protezione DNS", L"DNS protection"), white, g_font);
+        int r1_y = item1_y + 36;
+        rule(dc, m.col2_x + 28, r1_y, m.col2_w - 56);
+        int item2_y = r1_y + 12;
+        dot(dc, m.col2_x + 28, item2_y + 4, 10, g_vpn_active ? green : RGB(171, 109, 0));
+        text(dc, m.col2_x + 50, item2_y, LTXT(L"Protezione DNS", L"DNS protection"), white, g_font);
         const wchar_t *dns_label = (g_setting_dns_mode == 0) ? L"MapDNS 198.18.0.2 (Tor)" :
                                    ((g_setting_dns_mode == 1) ? L"Cloudflare 1.1.1.1 (Tor)" :
                                    ((g_setting_dns_mode == 2) ? L"Quad9 9.9.9.9 (Tor)" : g_setting_custom_dns_ip));
@@ -3174,33 +4055,43 @@ static void paint_dc(HDC dc, int w, int h) {
         _snwprintf_s(dns_info_text, _countof(dns_info_text), _TRUNCATE,
             g_vpn_active ? LTXT(L"Attivo nel tunnel: %s", L"Active in tunnel: %s") : LTXT(L"Si attiva con il tunnel", L"Enabled with the tunnel"),
             dns_label);
-        text(dc, 812, 314, dns_info_text, muted, g_small);
+        text(dc, m.col2_x + 50, item2_y + 22, dns_info_text, muted, g_small);
 
-        rule(dc, 788, 344, 312);
-        dot(dc, 790, 362, 10, RGB(211, 145, 31));
-        text(dc, 812, 358, LTXT(L"Compatibilità & Stream", L"Compatibility & Streams"), white, g_font);
-        text(dc, 812, 381, LTXT(L"TCP supportato integralmente", L"TCP fully supported"), muted, g_small);
-        text(dc, 812, 401, LTXT(L"UDP bloccato da Kill switch (Tor TCP-only)", L"UDP blocked by Kill switch (Tor TCP-only)"), muted, g_small);
-        text(dc, 788, 432, (g_setting_webrtc_shield && g_setting_stealth_mode) ?
+        int r2_y = item2_y + 48;
+        rule(dc, m.col2_x + 28, r2_y, m.col2_w - 56);
+        int item3_y = r2_y + 12;
+        dot(dc, m.col2_x + 28, item3_y + 4, 10, RGB(211, 145, 31));
+        text(dc, m.col2_x + 50, item3_y, LTXT(L"Compatibilità & Stream", L"Compatibility & Streams"), white, g_font);
+        text(dc, m.col2_x + 50, item3_y + 20, LTXT(L"TCP supportato integralmente", L"TCP fully supported"), muted, g_small);
+        text(dc, m.col2_x + 50, item3_y + 38, LTXT(L"UDP bloccato da Kill switch (Tor TCP-only)", L"UDP blocked by Kill switch (Tor TCP-only)"), muted, g_small);
+        text(dc, m.col2_x + 28, m.row1_y + m.row1_h - 18, (g_setting_webrtc_shield && g_setting_stealth_mode) ?
             LTXT(L"WebRTC & Stealth Shield attivi · 0 Leak LAN/STUN.", L"WebRTC & Stealth Shields active · 0 LAN/STUN leaks.") :
             LTXT(L"Isolamento stream per porta e destinazione attivo.", L"Stream isolation per port and dest active."), muted, g_caption);
 
         /* live circuit */
-        card(dc, 32, 490, 708, 268);
-        text(dc, 60, 510, LTXT(L"CIRCUITO TOR", L"TOR CIRCUIT"), muted, g_caption);
-        text(dc, 60, 532, LTXT(L"Relay attivi e nodi rilevati dalla rete Tor", L"Active relays and nodes reported by Tor"), white, g_font);
-        const int xs[3] = {60, 292, 524};
+        card(dc, m.col1_x, m.row2_y, m.col1_w, m.row2_h);
+        text(dc, m.col1_x + 28, m.row2_y + 16, LTXT(L"CIRCUITO TOR", L"TOR CIRCUIT"), muted, g_caption);
+        text(dc, m.col1_x + 28, m.row2_y + 34, LTXT(L"Relay attivi e nodi rilevati dalla rete Tor", L"Active relays and nodes reported by Tor"), white, g_font);
+
+        int hop_gap = 12;
+        int hop_w = (m.col1_w - 56 - 2 * hop_gap) / 3;
+        int hop_y = m.row2_y + 54;
+        int hop_h = m.row2_h - 54 - 28;
+        if(hop_h > 126) hop_h = 126;
+        if(hop_h < 95) hop_h = 95;
+
+        int xs[3] = {m.col1_x + 28, m.col1_x + 28 + hop_w + hop_gap, m.col1_x + 28 + (hop_w + hop_gap) * 2};
         const wchar_t *roles[3] = {LTXT(L"INGRESSO (GUARD)", L"GUARD (ENTRY)"), LTXT(L"INTERMEDIO (MIDDLE)", L"MIDDLE RELAY"), LTXT(L"USCITA (EXIT)", L"EXIT RELAY")};
         for(int i = 0; i < 3; i++) {
-            rect(dc, xs[i], 560, 194, 126, RGB(248, 250, 253), 12);
-            text(dc, xs[i] + 16, 572, roles[i], muted, g_caption);
-            draw_flag(dc, xs[i] + 16, 602, i);
+            rect(dc, xs[i], hop_y, hop_w, hop_h, RGB(248, 250, 253), 10);
+            text(dc, xs[i] + 14, hop_y + 8, roles[i], muted, g_caption);
+            draw_flag(dc, xs[i] + 14, hop_y + 30, i);
             if(g_hop_name[i][0]) {
                 wchar_t relay[48];
                 MultiByteToWideChar(CP_ACP, 0, g_hop_name[i], -1, relay, _countof(relay));
-                text(dc, xs[i] + 16, 650, relay, white, g_small);
+                text(dc, xs[i] + 14, hop_y + 60, relay, white, g_small);
             } else {
-                text(dc, xs[i] + 16, 650, g_connected ? LTXT(L"Circuito Tor in creazione…", L"Building Tor circuit…") :
+                text(dc, xs[i] + 14, hop_y + 60, g_connected ? LTXT(L"Circuito Tor in creazione…", L"Building Tor circuit…") :
                     LTXT(L"Nessun circuito attivo", L"No active circuit"), white, g_small);
             }
             if(i == 2 && g_attestation.latency_ms > 0) {
@@ -3208,25 +4099,25 @@ static void paint_dc(HDC dc, int w, int h) {
                 _snwprintf_s(exit_rep, _countof(exit_rep), _TRUNCATE,
                     LTXT(L"RTT: %d ms · Anti-MITM %d%%", L"RTT: %d ms · Anti-MITM %d%%"),
                     g_attestation.latency_ms, g_attestation.reputation_score ? g_attestation.reputation_score : 98);
-                text(dc, xs[i] + 16, 668, exit_rep, green, g_caption);
+                text(dc, xs[i] + 14, hop_y + 78, exit_rep, green, g_caption);
             }
             if(i < 2) {
-                rule(dc, xs[i] + 198, 618, 30);
-                dot(dc, xs[i] + 210, 614, 8, teal);
+                rule(dc, xs[i] + hop_w + 2, hop_y + 40, hop_gap - 4);
+                dot(dc, xs[i] + hop_w + hop_gap / 2, hop_y + 36, 8, teal);
             }
         }
-        text(dc, 60, 716, LTXT(L"Guard e Middle restano protetti e gestiti da Tor.", L"Guard and Middle remain protected and managed by Tor."), muted, g_caption);
+        text(dc, m.col1_x + 28, m.row2_y + m.row2_h - 18, LTXT(L"Guard e Middle restano protetti e gestiti da Tor.", L"Guard and Middle remain protected and managed by Tor."), muted, g_caption);
 
         /* rotation and session controls */
-        card(dc, 760, 490, 368, 268);
-        text(dc, 788, 510, LTXT(L"CIRCUITO E ROTAZIONE", L"CIRCUIT & ROTATION"), muted, g_caption);
-        text(dc, 788, 532, LTXT(L"Paese d'uscita preferito", L"Preferred exit country"), white, g_font);
+        card(dc, m.col2_x, m.row2_y, m.col2_w, m.row2_h);
+        text(dc, m.col2_x + 28, m.row2_y + 16, LTXT(L"CIRCUITO E ROTAZIONE", L"CIRCUIT & ROTATION"), muted, g_caption);
+        text(dc, m.col2_x + 28, m.row2_y + 34, LTXT(L"Paese d'uscita preferito", L"Preferred exit country"), white, g_font);
         if(g_exit_index == 0) {
-            text(dc, 788, 598, LTXT(L"Pool globale: Massimo anonimato matematico.", L"Global pool: Maximum mathematical anonymity."), green, g_caption);
+            text(dc, m.col2_x + 28, m.row2_y + 92, LTXT(L"Pool globale: Massimo anonimato matematico.", L"Global pool: Maximum mathematical anonymity."), green, g_caption);
         } else {
-            text(dc, 788, 598, LTXT(L"Modalità comodità: pool ristretto al paese scelto.", L"Convenience mode: pool limited to selected country."), RGB(190, 115, 20), g_caption);
+            text(dc, m.col2_x + 28, m.row2_y + 92, LTXT(L"Modalità comodità: pool ristretto al paese scelto.", L"Convenience mode: pool limited to selected country."), RGB(190, 115, 20), g_caption);
         }
-        text(dc, 788, 622, LTXT(L"FREQUENZA DI ROTAZIONE", L"ROTATION INTERVAL"), muted, g_caption);
+        text(dc, m.col2_x + 28, m.row2_y + 112, LTXT(L"FREQUENZA DI ROTAZIONE", L"ROTATION INTERVAL"), muted, g_caption);
         wchar_t info_nodes[128];
         if(g_exit_list_ready) {
             _snwprintf_s(info_nodes, _countof(info_nodes), _TRUNCATE,
@@ -3235,57 +4126,60 @@ static void paint_dc(HDC dc, int w, int h) {
         } else {
             wcscpy_s(info_nodes, _countof(info_nodes), LTXT(L"Sincronizzazione consenso nodi Tor…", L"Synchronizing Tor relay consensus…"));
         }
-        text(dc, 788, 702, info_nodes, green, g_caption);
+        text(dc, m.col2_x + 28, m.row2_y + m.row2_h - 18, info_nodes, green, g_caption);
 
     } else if(g_active_tab == TAB_SPEED) {
         /* TAB 1: Speed & Monitor */
-        card(dc, 32, 146, 260, 110);
-        dot(dc, 52, 166, 8, green);
-        text(dc, 66, 162, LTXT(L"DOWNLOAD SPEED", L"DOWNLOAD SPEED"), muted, g_caption);
+        int c_w = (m.content_w - 3 * 14) / 4;
+        card(dc, m.mx, 144, c_w, 98);
+        dot(dc, m.mx + 20, 162, 8, green);
+        text(dc, m.mx + 34, 158, LTXT(L"DOWNLOAD SPEED", L"DOWNLOAD SPEED"), muted, g_caption);
         wchar_t spd_rx[64]; format_speed(g_speed_rx_bps, spd_rx, _countof(spd_rx));
-        text(dc, 52, 184, spd_rx, green, g_heading);
-        text(dc, 52, 222, LTXT(L"Throughput in ricezione tunnel", L"Tunnel ingress throughput"), muted, g_caption);
+        text(dc, m.mx + 20, 178, spd_rx, green, g_heading);
+        text(dc, m.mx + 20, 212, LTXT(L"Throughput in ricezione tunnel", L"Tunnel ingress throughput"), muted, g_caption);
 
-        card(dc, 310, 146, 260, 110);
-        dot(dc, 330, 166, 8, teal);
-        text(dc, 344, 162, LTXT(L"UPLOAD SPEED", L"UPLOAD SPEED"), muted, g_caption);
+        card(dc, m.mx + (c_w + 14), 144, c_w, 98);
+        dot(dc, m.mx + (c_w + 14) + 20, 162, 8, teal);
+        text(dc, m.mx + (c_w + 14) + 34, 158, LTXT(L"UPLOAD SPEED", L"UPLOAD SPEED"), muted, g_caption);
         wchar_t spd_tx[64]; format_speed(g_speed_tx_bps, spd_tx, _countof(spd_tx));
-        text(dc, 330, 184, spd_tx, teal, g_heading);
-        text(dc, 330, 222, LTXT(L"Throughput in trasmissione", L"Tunnel egress throughput"), muted, g_caption);
+        text(dc, m.mx + (c_w + 14) + 20, 178, spd_tx, teal, g_heading);
+        text(dc, m.mx + (c_w + 14) + 20, 212, LTXT(L"Throughput in trasmissione", L"Tunnel egress throughput"), muted, g_caption);
 
-        card(dc, 588, 146, 260, 110);
-        dot(dc, 608, 166, 8, RGB(90, 80, 210));
-        text(dc, 622, 162, LTXT(L"VOLUME SESSIONE (RX/TX)", L"SESSION VOLUME (RX/TX)"), muted, g_caption);
+        card(dc, m.mx + (c_w + 14) * 2, 144, c_w, 98);
+        dot(dc, m.mx + (c_w + 14) * 2 + 20, 162, 8, RGB(90, 80, 210));
+        text(dc, m.mx + (c_w + 14) * 2 + 34, 158, LTXT(L"VOLUME SESSIONE (RX/TX)", L"SESSION VOLUME (RX/TX)"), muted, g_caption);
         wchar_t tot_rx[32], tot_tx[32], tot_str[64];
         format_bytes(g_total_rx_bytes, tot_rx, _countof(tot_rx));
         format_bytes(g_total_tx_bytes, tot_tx, _countof(tot_tx));
         _snwprintf_s(tot_str, _countof(tot_str), _TRUNCATE, L"%s / %s", tot_rx, tot_tx);
-        text(dc, 608, 186, tot_str, white, g_font_bold ? g_font_bold : g_font);
-        text(dc, 608, 222, LTXT(L"Traffico cifrato totale scambiato", L"Total encrypted bytes exchanged"), muted, g_caption);
+        text(dc, m.mx + (c_w + 14) * 2 + 20, 180, tot_str, white, g_font_bold ? g_font_bold : g_font);
+        text(dc, m.mx + (c_w + 14) * 2 + 20, 212, LTXT(L"Traffico cifrato totale scambiato", L"Total encrypted bytes exchanged"), muted, g_caption);
 
-        card(dc, 868, 146, 260, 110);
-        dot(dc, 888, 166, 8, RGB(220, 120, 20));
-        text(dc, 902, 162, LTXT(L"LATENZA & QUALITÀ TOR", L"TOR LATENCY & QUALITY"), muted, g_caption);
+        card(dc, m.mx + (c_w + 14) * 3, 144, c_w, 98);
+        dot(dc, m.mx + (c_w + 14) * 3 + 20, 162, 8, RGB(220, 120, 20));
+        text(dc, m.mx + (c_w + 14) * 3 + 34, 158, LTXT(L"LATENZA & QUALITÀ TOR", L"TOR LATENCY & QUALITY"), muted, g_caption);
         wchar_t lat_str[64];
         if(g_attestation.latency_ms > 0) _snwprintf_s(lat_str, _countof(lat_str), _TRUNCATE, L"%d ms", g_attestation.latency_ms);
         else wcscpy_s(lat_str, _countof(lat_str), g_connected ? L"~ 450 ms" : L"—");
-        text(dc, 888, 184, lat_str, white, g_heading);
+        text(dc, m.mx + (c_w + 14) * 3 + 20, 178, lat_str, white, g_heading);
         wchar_t q_str[64];
         _snwprintf_s(q_str, _countof(q_str), _TRUNCATE, LTXT(L"Anti-MITM: %d%% · 0 Leak", L"Anti-MITM: %d%% · 0 Leaks"),
             g_attestation.reputation_score ? g_attestation.reputation_score : 99);
-        text(dc, 888, 222, q_str, green, g_caption);
+        text(dc, m.mx + (c_w + 14) * 3 + 20, 212, q_str, green, g_caption);
 
         /* Real-Time Sparkline / Area Chart */
-        card(dc, 32, 272, 1096, 260);
-        text(dc, 60, 292, LTXT(L"MONITOR TRAFFICO IN TEMPO REALE (ULTIMI 30 SECONDI)", L"REAL-TIME TRAFFIC MONITOR (LAST 30 SECONDS)"), muted, g_caption);
-        text(dc, 60, 314, LTXT(L"Flusso pacchetti Wintun attraverso il circuito cifrato Tor", L"Wintun packet flow through the encrypted Tor circuit"), white, g_font);
+        int chart_y = 144 + 98 + 12;
+        int chart_h = (m.h >= 760) ? 250 : 190;
+        card(dc, m.mx, chart_y, m.content_w, chart_h);
+        text(dc, m.mx + 28, chart_y + 16, LTXT(L"MONITOR TRAFFICO IN TEMPO REALE (ULTIMI 30 SECONDI)", L"REAL-TIME TRAFFIC MONITOR (LAST 30 SECONDS)"), muted, g_caption);
+        text(dc, m.mx + 28, chart_y + 36, LTXT(L"Flusso pacchetti Wintun attraverso il circuito cifrato Tor", L"Wintun packet flow through the encrypted Tor circuit"), white, g_font);
 
-        dot(dc, 840, 297, 8, green);
-        text(dc, 854, 294, L"Download (RX)", muted, g_caption);
-        dot(dc, 960, 297, 8, teal);
-        text(dc, 974, 294, L"Upload (TX)", muted, g_caption);
+        dot(dc, m.mx + m.content_w - 240, chart_y + 20, 8, green);
+        text(dc, m.mx + m.content_w - 226, chart_y + 17, L"Download (RX)", muted, g_caption);
+        dot(dc, m.mx + m.content_w - 120, chart_y + 20, 8, teal);
+        text(dc, m.mx + m.content_w - 106, chart_y + 17, L"Upload (TX)", muted, g_caption);
 
-        int gx = 60, gy = 350, gw = 1040, gh = 150;
+        int gx = m.mx + 28, gy = chart_y + 60, gw = m.content_w - 56, gh = chart_h - 76;
         rect(dc, gx, gy, gw, gh, RGB(248, 250, 253), 8);
 
         DWORD max_speed = 1024 * 50;
@@ -3339,104 +4233,171 @@ static void paint_dc(HDC dc, int w, int h) {
         text(dc, gx + gw / 2 - 20, gy + gh - 18, L"-15s", muted, g_caption);
 
         /* Bottom Row: 2 Advanced Performance Cards */
-        card(dc, 32, 548, 538, 210);
-        text(dc, 60, 568, LTXT(L"PIPELINE SOCKET & DRIVER WINTUN", L"WINTUN DRIVER & SOCKET PIPELINE"), muted, g_caption);
-        text(dc, 60, 592, LTXT(L"Throughput e Ottimizzazione Kernel", L"Throughput & Kernel Optimization"), white, g_font);
+        int b_y = chart_y + chart_h + 12;
+        int b_h = m.h - b_y - 18;
+        if(b_h < 180) b_h = 180;
+        if(b_h > 210) b_h = 210;
+        int b_w = (m.content_w - 16) / 2;
+        card(dc, m.mx, b_y, b_w, b_h);
+        text(dc, m.mx + 28, b_y + 16, LTXT(L"PIPELINE SOCKET & DRIVER WINTUN", L"WINTUN DRIVER & SOCKET PIPELINE"), muted, g_caption);
+        text(dc, m.mx + 28, b_y + 36, LTXT(L"Throughput e Ottimizzazione Kernel", L"Throughput & Kernel Optimization"), white, g_font);
 
-        dot(dc, 60, 626, 8, green);
-        text(dc, 76, 622, LTXT(L"Wintun Ring Buffer: Capacità 4 MB · Zero packet drop", L"Wintun Ring Buffer: 4 MB Capacity · Zero packet drops"), white, g_small);
+        int line_step = (b_h >= 200) ? 26 : 22;
+        dot(dc, m.mx + 28, b_y + 68, 8, green);
+        text(dc, m.mx + 44, b_y + 64, LTXT(L"Wintun Ring Buffer: Capacità 4 MB · Zero packet drop", L"Wintun Ring Buffer: 4 MB Capacity · Zero packet drops"), white, g_small);
 
-        dot(dc, 60, 654, 8, teal);
-        text(dc, 76, 650, LTXT(L"Pipelining Asincrono: Attivo (Streaming a bassa latenza)", L"Async Pipelining: Active (Low-latency streaming)"), white, g_small);
+        dot(dc, m.mx + 28, b_y + 68 + line_step, 8, teal);
+        text(dc, m.mx + 44, b_y + 64 + line_step, LTXT(L"Pipelining Asincrono: Attivo (Streaming a bassa latenza)", L"Async Pipelining: Active (Low-latency streaming)"), white, g_small);
 
-        dot(dc, 60, 682, 8, green);
-        text(dc, 76, 678, LTXT(L"TCP Vegas/CUBIC Tuning: Finestra dinamica ottimizzata", L"TCP Vegas/CUBIC Tuning: Dynamic window tuned"), white, g_small);
+        dot(dc, m.mx + 28, b_y + 68 + line_step * 2, 8, green);
+        text(dc, m.mx + 44, b_y + 64 + line_step * 2, LTXT(L"TCP Vegas/CUBIC Tuning: Finestra dinamica ottimizzata", L"TCP Vegas/CUBIC Tuning: Dynamic window tuned"), white, g_small);
 
-        dot(dc, 60, 710, 8, RGB(211, 145, 31));
-        text(dc, 76, 706, LTXT(L"Politica UDP/QUIC: Fail-closed (Blocco totale leak)", L"UDP/QUIC Policy: Fail-closed (Zero leaks guaranteed)"), white, g_small);
+        dot(dc, m.mx + 28, b_y + 68 + line_step * 3, 8, RGB(211, 145, 31));
+        text(dc, m.mx + 44, b_y + 64 + line_step * 3, LTXT(L"Politica UDP/QUIC: Fail-closed (Blocco totale leak)", L"UDP/QUIC Policy: Fail-closed (Zero leaks guaranteed)"), white, g_small);
 
-        card(dc, 590, 548, 538, 210);
-        text(dc, 618, 568, LTXT(L"MULTIPLEXING TOR & CONSUMO HARDWARE", L"TOR MULTIPLEXING & HARDWARE CONSUMPTION"), muted, g_caption);
-        text(dc, 618, 592, LTXT(L"Stato Flussi e Risorse", L"Stream State & System Resources"), white, g_font);
+        card(dc, m.mx + b_w + 16, b_y, b_w, b_h);
+        text(dc, m.mx + b_w + 16 + 28, b_y + 16, LTXT(L"MULTIPLEXING TOR & CONSUMO HARDWARE", L"TOR MULTIPLEXING & HARDWARE CONSUMPTION"), muted, g_caption);
+        text(dc, m.mx + b_w + 16 + 28, b_y + 36, LTXT(L"Stato Flussi e Risorse", L"Stream State & System Resources"), white, g_font);
 
-        dot(dc, 618, 626, 8, green);
-        text(dc, 634, 622, LTXT(L"Stream Isolation: Circuiti isolati per porta e host", L"Stream Isolation: Separate circuits per port and host"), white, g_small);
+        dot(dc, m.mx + b_w + 16 + 28, b_y + 68, 8, green);
+        text(dc, m.mx + b_w + 16 + 44, b_y + 64, LTXT(L"Stream Isolation: Circuiti isolati per porta e host", L"Stream Isolation: Separate circuits per port and host"), white, g_small);
 
-        dot(dc, 618, 654, 8, teal);
-        text(dc, 634, 650, LTXT(L"Protezione Disco SSD: AvoidDiskWrites attivo (RAM cache)", L"SSD Protection: AvoidDiskWrites active (RAM cache)"), white, g_small);
+        dot(dc, m.mx + b_w + 16 + 28, b_y + 68 + line_step, 8, teal);
+        text(dc, m.mx + b_w + 16 + 44, b_y + 64 + line_step, LTXT(L"Protezione Disco SSD: AvoidDiskWrites attivo (RAM cache)", L"SSD Protection: AvoidDiskWrites active (RAM cache)"), white, g_small);
 
-        dot(dc, 618, 682, 8, green);
-        text(dc, 634, 678, LTXT(L"Porta Pentest SOCKS5: 127.0.0.1:9052 pronta", L"Dedicated Pentest Port: 127.0.0.1:9052 ready"), white, g_small);
+        dot(dc, m.mx + b_w + 16 + 28, b_y + 68 + line_step * 2, 8, green);
+        text(dc, m.mx + b_w + 16 + 44, b_y + 64 + line_step * 2, LTXT(L"Porta Pentest SOCKS5: 127.0.0.1:9052 pronta", L"Dedicated Pentest Port: 127.0.0.1:9052 ready"), white, g_small);
 
-        dot(dc, 618, 710, 8, teal);
-        text(dc, 634, 706, LTXT(L"Capacità Larghezza di Banda: Illimitata (Consensus)", L"Bandwidth Cap: Unlimited (Consensus-based)"), white, g_small);
+        dot(dc, m.mx + b_w + 16 + 28, b_y + 68 + line_step * 3, 8, teal);
+        text(dc, m.mx + b_w + 16 + 44, b_y + 64 + line_step * 3, LTXT(L"Capacità Larghezza di Banda: Illimitata (Consensus)", L"Bandwidth Cap: Unlimited (Consensus-based)"), white, g_small);
 
     } else if(g_active_tab == TAB_SETTINGS) {
         /* TAB 2: Impostazioni & DNS */
-        card(dc, 32, 146, 1096, 102);
-        text(dc, 60, 164, LTXT(L"RISOLUTORE DNS DI SISTEMA, GEO-MASKING & ANTI-ECS", L"SYSTEM DNS RESOLVER, GEO-MASKING & ANTI-ECS"), muted, g_caption);
-        text(dc, 60, 184, LTXT(L"Instrada le query DNS nel tunnel cifrato prevenendo DNS leak e profilazione geografica.", L"Route DNS queries through encrypted tunnel preventing DNS leaks and geographic profiling."), white, g_font);
+        card(dc, m.mx, 144, m.content_w, 94);
+        text(dc, m.mx + 28, 156, LTXT(L"RISOLUTORE DNS DI SISTEMA, GEO-MASKING & ANTI-ECS", L"SYSTEM DNS RESOLVER, GEO-MASKING & ANTI-ECS"), muted, g_caption);
+        text(dc, m.mx + 28, 172, LTXT(L"Instrada le query DNS nel tunnel cifrato prevenendo DNS leak e profilazione geografica.", L"Route DNS queries through encrypted tunnel preventing DNS leaks and geographic profiling."), white, g_font);
 
-        card(dc, 32, 258, 1096, 506);
-        text(dc, 60, 274, LTXT(L"PARAMETRI DI SICUREZZA, PERFORMANCE, TURBO & PENTESTING", L"SECURITY, PERFORMANCE, TURBO & PENTEST PARAMETERS"), muted, g_caption);
+        int tos_w = 120;
+        int tos_x = m.mx + m.content_w - 24 - tos_w;
+        int save_w = 210;
+        int save_x = tos_x - 12 - save_w;
+        int dns_avail = save_x - 14 - (m.mx + 28);
+        int combo_w = (dns_avail > 450) ? 450 : dns_avail;
 
-        vrule(dc, 560, 308, 436);
+        if(!g_window) {
+            rect(dc, m.mx + 28, 194, combo_w, 36, RGB(255, 255, 255), 10);
+            HPEN edge = CreatePen(PS_SOLID, 1, RGB(211, 221, 232)), old_e = (HPEN)SelectObject(dc, edge);
+            HGDIOBJ brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, m.mx + 28, 194, m.mx + 28 + combo_w, 194 + 36, 10, 10);
+            SelectObject(dc, brush); SelectObject(dc, old_e); DeleteObject(edge);
 
-        text(dc, 60, 304, LTXT(L"MOTORE TOR, VELOCITÀ & PERFORMANCE", L"TOR ENGINE, SPEED & PERFORMANCE"), muted, g_caption);
-        draw_toggle_col(dc, 60, 328, 420, g_setting_turbo_boost,
+            COLORREF dot_c = (g_setting_dns_mode == 0) ? green :
+                             ((g_setting_dns_mode == 1) ? RGB(246, 130, 31) :
+                             ((g_setting_dns_mode == 2) ? RGB(218, 41, 28) : teal));
+            dot(dc, m.mx + 28 + 14, 194 + 14, 8, dot_c);
+
+            RECT label = {m.mx + 28 + 30, 194, m.mx + 28 + combo_w - 36, 194 + 36};
+            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(20, 35, 50));
+            HFONT f = (HFONT)SelectObject(dc, g_font);
+            DrawTextW(dc, dns_mode_name(g_setting_dns_mode), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SelectObject(dc, f);
+
+            POINT arrow[3] = {{m.mx + 28 + combo_w - 24, 194 + 16},
+                              {m.mx + 28 + combo_w - 14, 194 + 16},
+                              {m.mx + 28 + combo_w - 19, 194 + 22}};
+            HBRUSH ab = CreateSolidBrush(muted);
+            HGDIOBJ ob = SelectObject(dc, ab);
+            Polygon(dc, arrow, 3);
+            SelectObject(dc, ob); DeleteObject(ab);
+
+            rect(dc, save_x, 194, save_w, 36, green, 10);
+            RECT r_save = {save_x, 194, save_x + save_w, 194 + 36};
+            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+            HFONT of_s = (HFONT)SelectObject(dc, g_font_bold ? g_font_bold : g_font);
+            DrawTextW(dc, LTXT(L"Salva e Applica Impostazioni", L"Save & Apply Settings"), -1, &r_save, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, of_s);
+
+            rect(dc, tos_x, 194, tos_w, 36, RGB(255, 255, 255), 10);
+            HPEN pt = CreatePen(PS_SOLID, 1, RGB(190, 215, 240));
+            HGDIOBJ opt = SelectObject(dc, pt);
+            HGDIOBJ obt = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, tos_x, 194, tos_x + tos_w, 194 + 36, 10, 10);
+            SelectObject(dc, obt); SelectObject(dc, opt); DeleteObject(pt);
+            RECT r_tos = {tos_x, 194, tos_x + tos_w, 194 + 36};
+            SetTextColor(dc, teal);
+            HFONT of_t = (HFONT)SelectObject(dc, g_small);
+            DrawTextW(dc, LTXT(L"Termini (ToS)", L"Terms of Service"), -1, &r_tos, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, of_t);
+        }
+
+        int card_h = m.h - 248 - 18;
+        if(card_h < 415) card_h = 415;
+        if(card_h > 514) card_h = 514;
+        card(dc, m.mx, 248, m.content_w, card_h);
+        text(dc, m.mx + 28, 264, LTXT(L"PARAMETRI DI SICUREZZA, PERFORMANCE, TURBO & PENTESTING", L"SECURITY, PERFORMANCE, TURBO & PENTEST PARAMETERS"), muted, g_caption);
+
+        vrule(dc, m.mx + m.content_w / 2, 292, card_h - 48);
+
+        int col1_sw_x = m.mx + m.content_w / 2 - 110;
+        int col2_sw_x = m.mx + m.content_w - 110;
+        int row_step = (card_h >= 470) ? 66 : 56;
+
+        text(dc, m.mx + 28, 292, LTXT(L"MOTORE TOR, VELOCITÀ & PERFORMANCE", L"TOR ENGINE, SPEED & PERFORMANCE"), muted, g_caption);
+        draw_toggle_col(dc, m.mx + 28, 314 + 0 * row_step, col1_sw_x, g_setting_turbo_boost,
             LTXT(L"Aurelia Turbo Boost & Multi-Guard Speed", L"Aurelia Turbo Boost & Multi-Guard Speed"),
-            LTXT(L"Pool di 6 Guard, FastFirstHopPK e timeout 4s per massima reattività.", L"6 Guard pool, FastFirstHopPK and 4s timeout for maximum speed."));
+            LTXT(L"Pool di 6 Guard, FastFirstHopPK e timeout 4s: massima velocità.", L"6 Guard pool, FastFirstHopPK and 4s timeout for fast speed."));
 
-        draw_toggle_col(dc, 60, 398, 420, g_setting_stream_isolation,
+        draw_toggle_col(dc, m.mx + 28, 314 + 1 * row_step, col1_sw_x, g_setting_stream_isolation,
             LTXT(L"Stream Isolation per Porta e Destinazione", L"Stream Isolation per Port and Destination"),
-            LTXT(L"Isola i circuiti per ogni host e app impedendo correlazioni incrociate.", L"Separate circuits per host and app preventing cross-correlation."));
+            LTXT(L"Circuiti isolati per host e app: zero correlazioni incrociate.", L"Separate circuits per host and app preventing correlation."));
 
-        draw_toggle_col(dc, 60, 468, 420, g_setting_fake_ip,
+        draw_toggle_col(dc, m.mx + 28, 314 + 2 * row_step, col1_sw_x, g_setting_fake_ip,
             LTXT(L"Motore Fake-IP Pool 198.18.0.0/15 & .onion", L"Fake-IP Engine (198.18.0.0/15) & .onion"),
             LTXT(L"Risoluzione DNS locale a 0 ms e routing trasparente domini .onion.", L"Instant 0-ms local DNS response and transparent .onion routing."));
 
-        draw_toggle_col(dc, 60, 538, 420, g_setting_pipeline_mode,
+        draw_toggle_col(dc, m.mx + 28, 314 + 3 * row_step, col1_sw_x, g_setting_pipeline_mode,
             LTXT(L"Ottimizzazione Pipeline Driver Wintun", L"Wintun Driver Pipeline Optimization"),
-            LTXT(L"Streaming asincrono pacchetti IP per massima fluidità di banda.", L"Async IP packet streaming for maximum bandwidth and throughput."));
+            LTXT(L"Streaming asincrono pacchetti IP per massima fluidità di banda.", L"Async IP packet streaming for maximum bandwidth."));
 
-        draw_toggle_col(dc, 60, 608, 420, g_setting_avoid_disk,
+        draw_toggle_col(dc, m.mx + 28, 314 + 4 * row_step, col1_sw_x, g_setting_avoid_disk,
             LTXT(L"Protezione Disco SSD (AvoidDiskWrites)", L"SSD Protection & Zero Disk Writes (AvoidDiskWrites)"),
-            LTXT(L"Conserva cache e stato Tor in RAM per azzerare l'usura del disco.", L"Keeps Tor state and cache in RAM eliminating SSD disk wear."));
+            LTXT(L"Conserva cache e stato Tor in RAM: zero usura del disco SSD.", L"Keeps Tor state and cache in RAM: zero SSD disk wear."));
 
-        draw_toggle_col(dc, 60, 678, 420, g_setting_pentest_port,
+        draw_toggle_col(dc, m.mx + 28, 314 + 5 * row_step, col1_sw_x, g_setting_pentest_port,
             LTXT(L"Porta SOCKS Pentest Dedicata (127.0.0.1:9052)", L"Dedicated Pentest SOCKS Port (127.0.0.1:9052)"),
-            LTXT(L"Porta pronta per Burp Suite, OWASP ZAP, curl e script di audit.", L"Ready upstream proxy for Burp Suite, OWASP ZAP, curl and scripts."));
+            LTXT(L"Porta pronta per Burp Suite, OWASP ZAP, curl e script di audit.", L"Ready upstream proxy for Burp Suite, OWASP ZAP and curl."));
 
-        text(dc, 590, 304, LTXT(L"SICUREZZA AVANZATA, WEBRTC & ANTI-LEAK", L"ADVANCED SECURITY, WEBRTC & ANTI-LEAK"), muted, g_caption);
-        draw_toggle_col(dc, 590, 328, 950, g_setting_webrtc_shield,
+        text(dc, m.mx + m.content_w / 2 + 28, 292, LTXT(L"SICUREZZA AVANZATA, WEBRTC & ANTI-LEAK", L"ADVANCED SECURITY, WEBRTC & ANTI-LEAK"), muted, g_caption);
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 0 * row_step, col2_sw_x, g_setting_webrtc_shield,
             LTXT(L"WebRTC Anti-Leak & Silent ICE Shield", L"WebRTC Anti-Leak & Silent ICE Shield"),
-            LTXT(L"Blocca leak STUN (UDP 3478/19302), candidati IP locali e bypass embed.", L"Blocks STUN leaks (UDP 3478/19302), local ICE candidates & embed bypass."));
+            LTXT(L"Blocca leak STUN (UDP 3478), candidati ICE e bypass embed.", L"Blocks STUN leaks (UDP 3478), local ICE candidates & bypass."));
 
-        draw_toggle_col(dc, 590, 398, 950, g_setting_dns_rebind_shield,
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 1 * row_step, col2_sw_x, g_setting_dns_rebind_shield,
             LTXT(L"Anti-DNS Rebinding & LAN Subnet Isolation", L"Anti-DNS Rebinding & LAN Subnet Isolation"),
-            LTXT(L"Impedisce a siti esterni di rimappare domini su 127.0.0.1 o LAN interna.", L"Prevents external sites from remapping domains to 127.0.0.1 or internal LAN."));
+            LTXT(L"Impedisce a siti remoti di rimappare domini su 127.0.0.1 o LAN.", L"Prevents external sites from remapping domains to local LAN."));
 
-        draw_toggle_col(dc, 590, 468, 950, g_setting_stealth_mode,
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 2 * row_step, col2_sw_x, g_setting_stealth_mode,
             LTXT(L"Windows Stealth Shield (Anti-Broadcast)", L"Windows Stealth Shield (Anti-Broadcast)"),
-            LTXT(L"Blocca perdite mDNS (5353), LLMNR (5355), NetBIOS (137) e SSDP.", L"Blocks mDNS (5353), LLMNR (5355), NetBIOS (137-139) and SSDP leaks."));
+            LTXT(L"Blocca leak broadcast mDNS (5353), LLMNR (5355), NetBIOS e SSDP.", L"Blocks mDNS (5353), LLMNR (5355), NetBIOS and SSDP leaks."));
 
-        draw_toggle_col(dc, 590, 538, 950, g_setting_strict_nodes,
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 3 * row_step, col2_sw_x, g_setting_strict_nodes,
             LTXT(L"Nodi di Uscita Rigorosi (Strict Exit Nodes)", L"Strict Exit Nodes"),
-            LTXT(L"Rifiuta rigorosamente circuiti fuori dal paese di uscita selezionato.", L"Strictly rejects circuits outside the chosen exit country."));
+            LTXT(L"Rifiuta rigorosamente circuiti fuori dal paese selezionato.", L"Strictly rejects circuits outside the chosen exit country."));
 
-        draw_toggle_col(dc, 590, 608, 950, g_setting_preboot_killswitch,
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 4 * row_step, col2_sw_x, g_setting_preboot_killswitch,
             LTXT(L"Kill Switch Pre-Boot Persistente WFP", L"Persistent Pre-Boot WFP Kill Switch"),
-            LTXT(L"Arma le regole firewall WFP prima dell'attivazione dei link di rete.", L"Arms WFP rules before network link activation: 0 leaks on roaming."));
+            LTXT(L"Arma le regole firewall WFP prima dell'avvio dei link di rete.", L"Arms WFP rules before network link activation: zero leaks."));
+
+        draw_toggle_col(dc, m.mx + m.content_w / 2 + 28, 314 + 5 * row_step, col2_sw_x, g_setting_ipv6_shield,
+            LTXT(L"Scudo Anti-Leak IPv6 & Filtro Null-Route", L"IPv6 Leak Protection & Null-Route Filter"),
+            LTXT(L"Blocca leak di uscita IPv6 prevenendo bypass esterni a Tor.", L"Blocks IPv6 egress preventing bypass leaks outside Tor."));
 
         if(GetTickCount() - g_settings_saved_tick < 3500) {
-            chip(dc, 590, 678, 480, 28,
+            chip(dc, m.mx + (m.content_w - 380) / 2, m.h - 40, 380, 24,
                 LTXT(L"✓ IMPOSTAZIONI SALVATE E APPLICATE", L"✓ SETTINGS SAVED & APPLIED"),
                 green, pale_green);
         }
     }
-
-    text(dc, 32, 776, LTXT(L"Aurelia · Kill switch Windows fail-closed · DNS anti-leak nel tunnel · Wintun C-native",
-        L"Aurelia · Fail-closed Windows kill switch · Anti-leak tunnel DNS · Wintun C-native"), muted, g_caption);
 }
 
 static void paint(HWND hwnd) {
@@ -3467,34 +4428,39 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)(g_app_icon_small ? g_app_icon_small : g_app_icon));
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)(g_app_icon_header ? g_app_icon_header : g_app_icon));
         }
-        g_language = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 838, 26, 106, 36, hwnd, (HMENU)ID_LANGUAGE, NULL, NULL);
-        g_connect = CreateWindowExW(0, L"BUTTON", L"Connetti a Tor", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 60, 414, 190, 48, hwnd, (HMENU)ID_CONNECT, NULL, NULL);
+        g_language = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 104, 36, hwnd, (HMENU)ID_LANGUAGE, NULL, NULL);
+        g_btn_about = CreateWindowExW(0, L"BUTTON", L"Info", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 80, 36, hwnd, (HMENU)ID_ABOUT, NULL, NULL);
+        g_connect = CreateWindowExW(0, L"BUTTON", L"Connetti a Tor", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 60, 414, 185, 48, hwnd, (HMENU)ID_CONNECT, NULL, NULL);
         g_rotate = CreateWindowExW(0, L"BUTTON", L"Nuovo circuito", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED, 262, 414, 175, 48, hwnd, (HMENU)ID_ROTATE, NULL, NULL);
         g_audit = CreateWindowExW(0, L"BUTTON", L"Audit & Sicurezza", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 449, 414, 175, 48, hwnd, (HMENU)ID_AUDIT, NULL, NULL);
-        g_country = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 556, 312, 38, hwnd, (HMENU)ID_COUNTRY, NULL, NULL);
+        g_country = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 556, 308, 38, hwnd, (HMENU)ID_COUNTRY, NULL, NULL);
         fill_country_options(g_exit_index);
-        g_interval = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 650, 198, 34, hwnd, (HMENU)ID_INTERVAL, NULL, NULL);
+        g_interval = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 788, 650, 192, 34, hwnd, (HMENU)ID_INTERVAL, NULL, NULL);
         fill_interval_options(g_interval_index);
-        g_btn_scan_nodes = CreateWindowExW(0, L"BUTTON", L"Scan Nodi", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 994, 650, 106, 34, hwnd, (HMENU)ID_SCAN_NODES, NULL, NULL);
+        g_btn_scan_nodes = CreateWindowExW(0, L"BUTTON", L"Scan Nodi", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 994, 650, 108, 34, hwnd, (HMENU)ID_SCAN_NODES, NULL, NULL);
 
         HANDLE init_disc = CreateThread(NULL, 0, exit_discovery_worker, NULL, 0, NULL);
         if(init_disc) CloseHandle(init_disc);
 
-        g_dns_combo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 60, 204, 440, 220, hwnd, (HMENU)ID_SETTING_DNS_COMBO, NULL, NULL);
+        g_dns_combo = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW, 60, 202, 420, 36, hwnd, (HMENU)ID_SETTING_DNS_COMBO, NULL, NULL);
         update_dns_combo_items();
 
-        g_dns_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_setting_custom_dns_ip, WS_CHILD | ES_AUTOHSCROLL, 515, 204, 220, 28, hwnd, (HMENU)ID_SETTING_DNS_EDIT, NULL, NULL);
+        g_dns_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_setting_custom_dns_ip, WS_CHILD | ES_AUTOHSCROLL, 480, 202, 210, 36, hwnd, (HMENU)ID_SETTING_DNS_EDIT, NULL, NULL);
         if(g_font) {
-            SendMessageW(g_dns_combo, WM_SETFONT, (WPARAM)g_font, TRUE);
             SendMessageW(g_dns_edit, WM_SETFONT, (WPARAM)g_font, TRUE);
         }
 
-        g_btn_save_settings = CreateWindowExW(0, L"BUTTON", L"Salva e Applica Impostazioni", WS_CHILD | BS_OWNERDRAW, 755, 198, 350, 38, hwnd, (HMENU)ID_SETTING_SAVE_BTN, NULL, NULL);
+        g_btn_save_settings = CreateWindowExW(0, L"BUTTON", L"Salva e Applica Impostazioni", WS_CHILD | BS_OWNERDRAW, 755, 202, 240, 36, hwnd, (HMENU)ID_SETTING_SAVE_BTN, NULL, NULL);
+        g_btn_view_tos = CreateWindowExW(0, L"BUTTON", L"Termini (ToS)", WS_CHILD | BS_OWNERDRAW, 1005, 202, 132, 36, hwnd, (HMENU)ID_SETTING_VIEW_TOS, NULL, NULL);
+
+        RECT init_rc; GetClientRect(hwnd, &init_rc);
+        reposition_controls(hwnd, init_rc.right - init_rc.left, init_rc.bottom - init_rc.top);
 
         tray_add();
         apply_language();
         switch_tab(g_active_tab);
         SetTimer(hwnd, 3, 50, NULL);
+        trigger_check_updates(0);
         return 0;
 
     case WM_ERASEBKGND:
@@ -3507,16 +4473,20 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int x = LOWORD(lp), y = HIWORD(lp);
         int old_hover = g_tab_hover;
+        RECT cr; GetClientRect(hwnd, &cr);
+        LayoutMetrics m;
+        get_layout_metrics(cr.right - cr.left, cr.bottom - cr.top, &m);
+
         if(y >= 90 && y <= 134) {
-            if(x >= 36 && x < 400) g_tab_hover = 0;
-            else if(x >= 400 && x < 764) g_tab_hover = 1;
-            else if(x >= 764 && x <= 1128) g_tab_hover = 2;
+            if(x >= m.tab_xs[0] && x < m.tab_xs[0] + m.tab_w) g_tab_hover = 0;
+            else if(x >= m.tab_xs[1] && x < m.tab_xs[1] + m.tab_w) g_tab_hover = 1;
+            else if(x >= m.tab_xs[2] && x <= m.tab_xs[2] + m.tab_w) g_tab_hover = 2;
             else g_tab_hover = -1;
         } else {
             g_tab_hover = -1;
         }
         if(g_tab_hover != old_hover) {
-            RECT tr = {32, 90, 1128, 134};
+            RECT tr = {m.mx, 90, m.mx + m.content_w, 134};
             InvalidateRect(hwnd, &tr, FALSE);
         }
         break;
@@ -3524,28 +4494,46 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_LBUTTONUP: {
         int x = LOWORD(lp), y = HIWORD(lp);
+        RECT cr; GetClientRect(hwnd, &cr);
+        LayoutMetrics m;
+        get_layout_metrics(cr.right - cr.left, cr.bottom - cr.top, &m);
+
         if(y >= 90 && y <= 134) {
-            if(x >= 36 && x < 400) { switch_tab(TAB_TUNNEL); return 0; }
-            else if(x >= 400 && x < 764) { switch_tab(TAB_SPEED); return 0; }
-            else if(x >= 764 && x <= 1128) { switch_tab(TAB_SETTINGS); return 0; }
+            if(x >= m.tab_xs[0] && x < m.tab_xs[0] + m.tab_w) { switch_tab(TAB_TUNNEL); return 0; }
+            else if(x >= m.tab_xs[1] && x < m.tab_xs[1] + m.tab_w) { switch_tab(TAB_SPEED); return 0; }
+            else if(x >= m.tab_xs[2] && x <= m.tab_xs[2] + m.tab_w) { switch_tab(TAB_SETTINGS); return 0; }
         }
         if(g_active_tab == TAB_SETTINGS) {
-            // Column 1: Left (x >= 50 && x <= 555)
-            if(x >= 50 && x <= 555) {
-                if(y >= 322 && y <= 382) { g_setting_turbo_boost = !g_setting_turbo_boost; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 392 && y <= 452) { g_setting_stream_isolation = !g_setting_stream_isolation; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 462 && y <= 522) { g_setting_fake_ip = !g_setting_fake_ip; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 532 && y <= 592) { g_setting_pipeline_mode = !g_setting_pipeline_mode; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 602 && y <= 662) { g_setting_avoid_disk = !g_setting_avoid_disk; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 672 && y <= 732) { g_setting_pentest_port = !g_setting_pentest_port; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-            }
-            // Column 2: Right (x >= 575 && x <= 1090)
-            if(x >= 575 && x <= 1090) {
-                if(y >= 322 && y <= 382) { g_setting_webrtc_shield = !g_setting_webrtc_shield; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 392 && y <= 452) { g_setting_dns_rebind_shield = !g_setting_dns_rebind_shield; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 462 && y <= 522) { g_setting_stealth_mode = !g_setting_stealth_mode; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 532 && y <= 592) { g_setting_strict_nodes = !g_setting_strict_nodes; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-                if(y >= 602 && y <= 662) { g_setting_preboot_killswitch = !g_setting_preboot_killswitch; save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+            int card_h = m.h - 248 - 18;
+            if(card_h < 415) card_h = 415;
+            if(card_h > 514) card_h = 514;
+            int row_step = (card_h >= 470) ? 66 : 56;
+
+            int col1_left = m.mx + 20, col1_right = m.mx + m.content_w / 2 - 10;
+            int col2_left = m.mx + m.content_w / 2 + 10, col2_right = m.mx + m.content_w - 20;
+
+            for(int k = 0; k < 6; k++) {
+                int ry = 314 + k * row_step;
+                if(y >= ry - 6 && y <= ry + 44) {
+                    if(x >= col1_left && x <= col1_right) {
+                        if(k == 0) g_setting_turbo_boost = !g_setting_turbo_boost;
+                        else if(k == 1) g_setting_stream_isolation = !g_setting_stream_isolation;
+                        else if(k == 2) g_setting_fake_ip = !g_setting_fake_ip;
+                        else if(k == 3) g_setting_pipeline_mode = !g_setting_pipeline_mode;
+                        else if(k == 4) g_setting_avoid_disk = !g_setting_avoid_disk;
+                        else if(k == 5) g_setting_pentest_port = !g_setting_pentest_port;
+                        save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+                    }
+                    if(x >= col2_left && x <= col2_right) {
+                        if(k == 0) g_setting_webrtc_shield = !g_setting_webrtc_shield;
+                        else if(k == 1) g_setting_dns_rebind_shield = !g_setting_dns_rebind_shield;
+                        else if(k == 2) g_setting_stealth_mode = !g_setting_stealth_mode;
+                        else if(k == 3) g_setting_strict_nodes = !g_setting_strict_nodes;
+                        else if(k == 4) g_setting_preboot_killswitch = !g_setting_preboot_killswitch;
+                        else if(k == 5) g_setting_ipv6_shield = !g_setting_ipv6_shield;
+                        save_preferences(); g_settings_saved_tick = GetTickCount(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+                    }
+                }
             }
         }
         break;
@@ -3559,6 +4547,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if(id == ID_COUNTRY) { draw_country_button(d); return TRUE; }
         if(id == ID_INTERVAL) { draw_interval_button(d); return TRUE; }
         if(id == ID_LANGUAGE) { draw_language_button(d); return TRUE; }
+        if(id == ID_SETTING_DNS_COMBO) { draw_dns_button(d); return TRUE; }
 
         if(id == ID_CONNECT) {
             BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
@@ -3661,13 +4650,49 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SelectObject(dc, old);
             return TRUE;
         }
+
+        if(id == ID_ABOUT) {
+            BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
+            rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, pressed ? RGB(235, 245, 255) : RGB(255, 255, 255), 9);
+            HPEN p = CreatePen(PS_SOLID, 1, pressed ? teal : RGB(211, 221, 232)), old = (HPEN)SelectObject(dc, p);
+            HGDIOBJ b = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, r.left, r.top, r.right, r.bottom, 9, 9);
+            SelectObject(dc, b); SelectObject(dc, old); DeleteObject(p);
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, teal);
+            HFONT old_f = (HFONT)SelectObject(dc, g_small);
+            DrawTextW(dc, LTXT(L"Info", L"About"), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, old_f);
+            return TRUE;
+        }
+
+        if(id == ID_SETTING_VIEW_TOS) {
+            BOOL pressed = (d->itemState & ODS_SELECTED) != 0;
+            rect(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, pressed ? RGB(235, 245, 255) : RGB(255, 255, 255), 8);
+            HPEN p = CreatePen(PS_SOLID, 1, pressed ? teal : RGB(211, 221, 232)), old = (HPEN)SelectObject(dc, p);
+            HGDIOBJ b = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, r.left, r.top, r.right, r.bottom, 8, 8);
+            SelectObject(dc, b); SelectObject(dc, old); DeleteObject(p);
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, teal);
+            HFONT old_f = (HFONT)SelectObject(dc, g_small);
+            DrawTextW(dc, LTXT(L"Termini (ToS)", L"Terms of Service"), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, old_f);
+            return TRUE;
+        }
         return TRUE;
     }
 
     case WM_TIMER:
         if(wp == 3) {
             g_anim_phase = (g_anim_phase + 3) % 360;
-            RECT orbit = {540, 185, 748, 395};
+            RECT cr; GetClientRect(hwnd, &cr);
+            LayoutMetrics m;
+            get_layout_metrics(cr.right - cr.left, cr.bottom - cr.top, &m);
+            int r_box = (int)(98.0f * m.shield_scale) + 8;
+            RECT orbit = {m.shield_cx - r_box, m.shield_cy - r_box, m.shield_cx + r_box, m.shield_cy + r_box};
             InvalidateRect(hwnd, &orbit, FALSE);
             return 0;
         }
@@ -3815,6 +4840,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         if(LOWORD(wp) == ID_TRAY_EXIT) { g_exit_app = 1; DestroyWindow(hwnd); return 0; }
         if(LOWORD(wp) == ID_LANGUAGE && HIWORD(wp) == BN_CLICKED) { toggle_language_popup(); return 0; }
+        if(LOWORD(wp) == ID_ABOUT) { open_about_dialog(hwnd); return 0; }
+        if(LOWORD(wp) == ID_SETTING_VIEW_TOS) { show_tos_dialog(g_instance, hwnd, 1); return 0; }
         if(LOWORD(wp) == ID_COUNTRY && HIWORD(wp) == BN_CLICKED) { toggle_country_popup(); return 0; }
         if(LOWORD(wp) == ID_INTERVAL && HIWORD(wp) == BN_CLICKED) { toggle_interval_popup(); return 0; }
         if(LOWORD(wp) == ID_AUDIT) { open_audit_dialog(hwnd); return 0; }
@@ -3825,15 +4852,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
-        if(LOWORD(wp) == ID_SETTING_DNS_COMBO && HIWORD(wp) == CBN_SELCHANGE) {
-            g_setting_dns_mode = (int)SendMessageW(g_dns_combo, CB_GETCURSEL, 0, 0);
-            ShowWindow(g_dns_edit, (g_setting_dns_mode == 3) ? SW_SHOW : SW_HIDE);
-            InvalidateRect(hwnd, NULL, FALSE);
+        if(LOWORD(wp) == ID_SETTING_DNS_COMBO) {
+            toggle_dns_popup();
             return 0;
         }
 
         if(LOWORD(wp) == ID_SETTING_SAVE_BTN) {
-            g_setting_dns_mode = (int)SendMessageW(g_dns_combo, CB_GETCURSEL, 0, 0);
             GetWindowTextW(g_dns_edit, g_setting_custom_dns_ip, _countof(g_setting_custom_dns_ip));
             save_preferences();
             g_settings_saved_tick = GetTickCount();
@@ -3885,6 +4909,32 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
 
+    case WM_UPDATE_RESULT: {
+        UpdateCheckResult *res = (UpdateCheckResult*)lp;
+        if(res) {
+            if(res->available) {
+                wchar_t prompt[512];
+                _snwprintf_s(prompt, _countof(prompt), _TRUNCATE,
+                    LTXT(L"È disponibile una nuova versione di Aurelia (%s)!\r\n\r\nVersione attuale: %s\r\nNuova versione: %s\r\n\r\nVuoi aprire la pagina di rilascio su GitHub per scaricarla?",
+                         L"A new version of Aurelia (%s) is available!\r\n\r\nCurrent version: %s\r\nLatest version: %s\r\n\r\nWould you like to open the GitHub release download page?"),
+                    res->new_version, APP_VERSION_STR, res->new_version);
+                if(MessageBoxW(hwnd, prompt, APP_NAME, MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                    const wchar_t *url = res->download_url[0] ? res->download_url : L"https://github.com/mzguardit/aurelia/releases/latest";
+                    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+                }
+            } else if(res->manual) {
+                wchar_t up_msg[256];
+                _snwprintf_s(up_msg, _countof(up_msg), _TRUNCATE,
+                    LTXT(L"Stai utilizzando l'ultima versione di Aurelia (%s).\r\nNessun aggiornamento disponibile.",
+                         L"You are using the latest version of Aurelia (%s).\r\nNo updates available."),
+                    APP_VERSION_STR);
+                MessageBoxW(hwnd, up_msg, APP_NAME, MB_OK | MB_ICONINFORMATION);
+            }
+            HeapFree(GetProcessHeap(), 0, res);
+        }
+        return 0;
+    }
+
     case WM_TRAYICON: {
         UINT event = (UINT)LOWORD(lp);
         if(event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK) {
@@ -3896,8 +4946,26 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_SYSCOMMAND:
+        if((wp & 0xFFF0) == SC_MAXIMIZE) return 0;
+        break;
+
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = 940;
+        mmi->ptMinTrackSize.y = 660;
+        mmi->ptMaxTrackSize.x = 1200;
+        mmi->ptMaxTrackSize.y = 860;
+        return 0;
+    }
+
     case WM_SIZE:
-        if(wp == SIZE_MINIMIZED) ShowWindow(hwnd, SW_HIDE);
+        if(wp == SIZE_MINIMIZED) {
+            ShowWindow(hwnd, SW_HIDE);
+        } else {
+            reposition_controls(hwnd, LOWORD(lp), HIWORD(lp));
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
         return 0;
 
     case WM_CLOSE:
@@ -3937,7 +5005,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     g_emoji = CreateFontW(34, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Emoji");
 
     if(cmd && wcsstr(cmd, L"--screenshot")) {
-        int w = 1160, h = 840;
+        int w = 1144, h = 800;
+        int is_compact = (wcsstr(cmd, L"--compact") != NULL);
+        if(is_compact) { w = 1000; h = 648; }
+        if(wcsstr(cmd, L"--screenshot-settings")) g_active_tab = TAB_SETTINGS;
+        else if(wcsstr(cmd, L"--screenshot-speed")) g_active_tab = TAB_SPEED;
+        else g_active_tab = TAB_TUNNEL;
+
+        int is_about = (wcsstr(cmd, L"--screenshot-about") != NULL);
+        if(is_about) { w = 644; h = 394; }
+
+        const wchar_t *out_name = is_about ? L"docs\\screenshot_about.bmp" :
+            (is_compact ?
+                ((g_active_tab == TAB_SETTINGS) ? L"docs\\screenshot_settings_compact.bmp" :
+                 ((g_active_tab == TAB_SPEED) ? L"docs\\screenshot_speed_compact.bmp" : L"docs\\screenshot_compact.bmp")) :
+                ((g_active_tab == TAB_SETTINGS) ? L"docs\\screenshot_settings.bmp" :
+                 ((g_active_tab == TAB_SPEED) ? L"docs\\screenshot_speed.bmp" : L"docs\\screenshot.bmp")));
+
         HDC sdc = GetDC(NULL);
         HDC dc = CreateCompatibleDC(sdc);
         BITMAPINFO bi = {0};
@@ -3950,10 +5034,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
         void *bits = NULL;
         HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
         HGDIOBJ old = SelectObject(dc, dib);
-        paint_dc(dc, w, h);
+        if(is_about) paint_about_dc(dc, w, h);
+        else paint_dc(dc, w, h);
         CreateDirectoryW(L"docs", NULL);
         FILE *f = NULL;
-        if(_wfopen_s(&f, L"docs\\screenshot.bmp", L"wb") == 0 && f) {
+        if(_wfopen_s(&f, out_name, L"wb") == 0 && f) {
             int row_bytes = ((w * 3 + 3) / 4) * 4;
             int img_size = row_bytes * h;
             BITMAPFILEHEADER bfh = {0};
@@ -3996,6 +5081,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     lclass.hbrBackground = CreateSolidBrush(panel);
     RegisterClassW(&lclass);
 
+    WNDCLASSW dnsc = {0};
+    dnsc.lpfnWndProc = dns_popup_proc;
+    dnsc.hInstance = inst;
+    dnsc.lpszClassName = L"AureliaDnsPopup";
+    dnsc.hCursor = LoadCursor(NULL, IDC_HAND);
+    dnsc.hbrBackground = CreateSolidBrush(panel);
+    RegisterClassW(&dnsc);
+
     WNDCLASSW aclass = {0};
     aclass.lpfnWndProc = audit_dialog_proc;
     aclass.hInstance = inst;
@@ -4012,6 +5105,28 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     sclass.hbrBackground = CreateSolidBrush(bg);
     RegisterClassW(&sclass);
 
+    WNDCLASSW abclass = {0};
+    abclass.lpfnWndProc = about_dialog_proc;
+    abclass.hInstance = inst;
+    abclass.lpszClassName = L"AureliaAboutDialog";
+    abclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    abclass.hbrBackground = CreateSolidBrush(bg);
+    RegisterClassW(&abclass);
+
+    WNDCLASSW tclass = {0};
+    tclass.lpfnWndProc = tos_dialog_proc;
+    tclass.hInstance = inst;
+    tclass.lpszClassName = L"AureliaTosDialog";
+    tclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    tclass.hbrBackground = CreateSolidBrush(bg);
+    RegisterClassW(&tclass);
+
+    if(!is_tos_accepted()) {
+        int accepted = show_tos_dialog(inst, NULL, 0);
+        if(!accepted) return 0;
+        set_tos_accepted(1);
+    }
+
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = inst;
@@ -4021,9 +5136,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     wc.hbrBackground = CreateSolidBrush(bg);
     RegisterClassW(&wc);
 
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int work_w = wa.right - wa.left;
+    int work_h = wa.bottom - wa.top;
+
+    int target_client_w = WIN_W;
+    int target_client_h = WIN_H;
+    if(target_client_w > work_w - 24) target_client_w = work_w - 24;
+    if(target_client_h > work_h - 48) target_client_h = work_h - 48;
+
+    DWORD win_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
+    RECT wr = {0, 0, target_client_w, target_client_h};
+    AdjustWindowRectEx(&wr, win_style, FALSE, 0);
+    int win_w = wr.right - wr.left;
+    int win_h = wr.bottom - wr.top;
+    int win_x = wa.left + (work_w - win_w) / 2;
+    int win_y = wa.top + (work_h - win_h) / 2;
+    if(win_x < wa.left) win_x = wa.left;
+    if(win_y < wa.top) win_y = wa.top;
+
     HWND h = CreateWindowExW(0, wc.lpszClassName, APP_NAME,
-                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE | WS_CLIPCHILDREN,
-                             CW_USEDEFAULT, CW_USEDEFAULT, WIN_W, WIN_H + 40, NULL, NULL, inst, NULL);
+                             win_style | WS_VISIBLE | WS_CLIPCHILDREN,
+                             win_x, win_y, win_w, win_h, NULL, NULL, inst, NULL);
     if(!h) return 1;
     ShowWindow(h, show);
     UpdateWindow(h);

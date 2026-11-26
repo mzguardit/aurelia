@@ -1,8 +1,8 @@
 ; Aurelia VPN - Professional Inno Setup Script
 #define MyAppName "Aurelia VPN"
 #define MyAppVersion "1.1.0"
-#define MyAppPublisher "mzguardit"
-#define MyAppURL "https://github.com/mzguardit/aurelia"
+#define MyAppPublisher "SoftEdition (softedition.com)"
+#define MyAppURL "https://softedition.com"
 #define MyAppExeName "aurelia.exe"
 
 [Setup]
@@ -11,8 +11,9 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
-AppSupportURL={#MyAppURL}/issues
-AppUpdatesURL={#MyAppURL}/releases
+AppSupportURL={#MyAppURL}
+AppUpdatesURL=https://github.com/mzguardit/aurelia/releases
+AppCopyright=Copyright (C) 2026 softedition.com
 DefaultDirName={autopf}\Aurelia
 DefaultGroupName={#MyAppName}
 LicenseFile=..\LICENSE
