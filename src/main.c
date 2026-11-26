@@ -743,6 +743,11 @@ static int run_tor(void) {
     CreateDirectoryW(g_appdir, NULL);
     _snwprintf_s(g_cookie, MAX_PATH, _TRUNCATE, L"%s\\control_auth_cookie", g_appdir);
     _snwprintf_s(g_torrc, MAX_PATH, _TRUNCATE, L"%s\\torrc", g_appdir);
+    wchar_t state_file[MAX_PATH];
+    _snwprintf_s(state_file, MAX_PATH, _TRUNCATE, L"%s\\state", g_appdir);
+    if (g_setting_avoid_disk) {
+        DeleteFileW(state_file);
+    }
 
     wchar_t escaped_dir[MAX_PATH * 2], escaped_cookie[MAX_PATH * 2];
     escape_path(g_appdir, escaped_dir, _countof(escaped_dir));
@@ -790,16 +795,11 @@ static int run_tor(void) {
     wchar_t turbo_line[512] = L"";
     if (g_setting_turbo_boost) {
         wcscpy_s(turbo_line, _countof(turbo_line),
-            L"FastFirstHopPK 1\r\n"
-            L"NumEntryGuards 6\r\n"
-            L"CircuitBuildTimeout 4\r\n"
-            L"LearnCircuitBuildTimeout 1\r\n"
+            L"NumEntryGuards 3\r\n"
             L"MaxCircuitDirtiness 300\r\n");
     } else {
         wcscpy_s(turbo_line, _countof(turbo_line),
-            L"NumEntryGuards 3\r\n"
-            L"CircuitBuildTimeout 10\r\n"
-            L"LearnCircuitBuildTimeout 1\r\n"
+            L"NumEntryGuards 2\r\n"
             L"MaxCircuitDirtiness 600\r\n");
     }
 
@@ -1629,7 +1629,12 @@ static int start_vpn(void) {
         if(InterlockedCompareExchange(&g_cancel_start, 0, 0)) { trace_start(L"start canceled during Tor bootstrap"); SetEvent(g_stop_event); return 0; }
         if(WaitForSingleObject(g_helper_process, 0) == WAIT_OBJECT_0) { trace_start(L"failed: helper exited while Tor bootstrapped"); return 0; }
         bootstrapped = tor_bootstrap_complete();
-        if(!bootstrapped) Sleep(1000);
+        if(!bootstrapped) {
+            if(i == 15 || i == 30) {
+                tor_newnym();
+            }
+            Sleep(1000);
+        }
     }
     if(!bootstrapped) { trace_start(L"failed: Tor bootstrap timeout"); SetEvent(g_stop_event); return 0; }
     trace_start(L"Tor bootstrap reached 100 percent");
@@ -4344,8 +4349,8 @@ static void paint_dc(HDC dc, int w, int h) {
 
         text(dc, m.mx + 28, 292, LTXT(L"MOTORE TOR, VELOCITÀ & PERFORMANCE", L"TOR ENGINE, SPEED & PERFORMANCE"), muted, g_caption);
         draw_toggle_col(dc, m.mx + 28, 314 + 0 * row_step, col1_sw_x, g_setting_turbo_boost,
-            LTXT(L"Aurelia Turbo Boost & Multi-Guard Speed", L"Aurelia Turbo Boost & Multi-Guard Speed"),
-            LTXT(L"Pool di 6 Guard, FastFirstHopPK e timeout 4s: massima velocità.", L"6 Guard pool, FastFirstHopPK and 4s timeout for fast speed."));
+            LTXT(L"Aurelia Turbo Boost & Adaptive Speed", L"Aurelia Turbo Boost & Adaptive Speed"),
+            LTXT(L"Pool ottimizzato di Guard e calibrazione dinamica: massima velocità.", L"Optimized Guard pool and adaptive circuit calibration for fast speed."));
 
         draw_toggle_col(dc, m.mx + 28, 314 + 1 * row_step, col1_sw_x, g_setting_stream_isolation,
             LTXT(L"Stream Isolation per Porta e Destinazione", L"Stream Isolation per Port and Destination"),

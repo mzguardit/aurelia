@@ -100,7 +100,7 @@ Traditional Tor usage on Windows is typically confined to the Tor Browser applic
 | **Fail-Closed Pre-Boot Kill Switch** | Native WFP (Kernel) | Not Applicable | Proprietary Driver | None |
 | **Zero-Leak DNS & Fake-IP Engine** | Synthetic 198.18.0.0/15 | Internal SOCKS | Provider DNS | Vulnerable |
 | **Universal .onion Support for All Apps** | Transparent Native | Browser Only | None | Manual Proxy |
-| **Aurelia Turbo Boost (Multi-Guard)** | 6 Guards + FastFirstHop | Standard 1-3 | Not Applicable | Not Applicable |
+| **Aurelia Turbo Boost (Multi-Guard)** | Adaptive 3-Guard Pool | Standard 1-3 | Not Applicable | Not Applicable |
 | **Windows Stealth Shield (Anti-LAN Leak)** | WFP mDNS/LLMNR/SSDP Drop | Not Applicable | Rare | None |
 | **Dynamic Stream Isolation** | Distinct Circuit / Target | Tab-level | Single Tunnel IP | None |
 | **Traffic Anonymity** | Multi-Hop Tor Network | Multi-Hop Tor | Single Provider IP | Single Node |
