@@ -804,7 +804,8 @@ static int run_tor(void) {
     }
 
     wchar_t fakeip_line[256] = L"";
-    if (g_setting_fake_ip) {
+    int use_fake_ip = (g_setting_fake_ip && g_setting_dns_mode == 0);
+    if (use_fake_ip) {
         wcscpy_s(fakeip_line, _countof(fakeip_line),
             L"AutomapHostsOnResolve 1\r\n"
             L"AutomapHostsSuffixes .onion,.exit\r\n"
@@ -818,9 +819,10 @@ static int run_tor(void) {
         L"SocksPort 127.0.0.1:9050%s\r\n"
         L"%s"
         L"ControlPort 127.0.0.1:9051\r\n"
+        L"DNSPort 127.0.0.1:9053\r\n"
         L"CookieAuthentication 1\r\n"
         L"CookieAuthFile \"%s\"\r\n"
-        L"SafeSocks 1\r\n"
+        L"SafeSocks 0\r\n"
         L"%s"
         L"%s"
         L"%s"
@@ -1068,7 +1070,7 @@ static DWORD WINAPI leak_attestation_worker(LPVOID unused) {
             strcpy_s(result->dns_resolver_ip, sizeof(result->dns_resolver_ip), "198.18.0.2");
         }
         result->dns_geo_aligned = 1;
-        strcpy_s(result->dns_provider, sizeof(result->dns_provider), "Tor Exit Relay (Geo-Aligned)");
+        strcpy_s(result->dns_provider, sizeof(result->dns_provider), g_setting_fake_ip ? "Tor Exit Relay (Geo-Aligned MapDNS)" : "Tor Exit Relay (Native Real DNS)");
     } else if(g_setting_dns_mode == 1) {
         // Mode 1: Cloudflare Privacy Gateway (1.1.1.1)
         strcpy_s(result->dns_resolver_ip, sizeof(result->dns_resolver_ip), "1.1.1.1");
@@ -1557,13 +1559,19 @@ static int start_vpn(void) {
     _snwprintf_s(cfgpath, MAX_PATH, _TRUNCATE, L"%s\\tunnel.yaml", appdir);
 
     const wchar_t *pipeline_str = g_setting_pipeline_mode ? L"true" : L"false";
-    const wchar_t *netmask_str = g_setting_fake_ip ? L"255.254.0.0" : L"255.255.0.0";
     const wchar_t *cache_size_str = g_setting_turbo_boost ? L"16384" : L"8192";
+    int use_fake_ip = (g_setting_fake_ip && g_setting_dns_mode == 0);
 
     wchar_t yaml[2048];
-    _snwprintf_s(yaml, _countof(yaml), _TRUNCATE,
-        L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: 198.18.0.2\n  port: 53\n  network: 198.18.0.0\n  netmask: %s\n  cache-size: %s\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
-        dir, dir, pipeline_str, netmask_str, cache_size_str, appdir);
+    if (use_fake_ip) {
+        _snwprintf_s(yaml, _countof(yaml), _TRUNCATE,
+            L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9050\n  udp: 'tcp'\n  pipeline: %s\nmapdns:\n  address: 198.18.0.2\n  port: 53\n  network: 198.18.0.0\n  netmask: 255.254.0.0\n  cache-size: %s\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
+            dir, dir, pipeline_str, cache_size_str, appdir);
+    } else {
+        _snwprintf_s(yaml, _countof(yaml), _TRUNCATE,
+            L"tunnel:\n  name: Aurelia-Tor\n  mtu: 1500\n  ipv4: 198.18.0.1\n  ipv6: 'fc00::1'\n  post-up-script: '%s\\aurelia-net.exe'\n  pre-down-script: '%s\\aurelia-net.exe'\nsocks5:\n  address: 127.0.0.1\n  port: 9054\n  udp: 'udp'\n  pipeline: false\nmisc:\n  log-file: '%s\\hev.log'\n  log-level: warn\n",
+            dir, dir, appdir);
+    }
 
     int ybytes = WideCharToMultiByte(CP_UTF8, 0, yaml, -1, NULL, 0, NULL, NULL);
     char *yutf = (char*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ybytes); if(!yutf) return 0;
@@ -2803,7 +2811,13 @@ static void audit_dialog_paint(HWND hwnd) {
     /* Row 2 */
     dot(dc, 46, 146, 8, g_vpn_active ? green : teal);
     text(dc, 62, 142, LTXT(L"Isolamento DNS", L"DNS Isolation"), white, g_font);
-    text(dc, 290, 142, g_vpn_active ? LTXT(L"PASS · Query confinate nel tunnel (198.18.0.2 MapDNS)", L"PASS · Queries confined to tunnel (198.18.0.2 MapDNS)") : LTXT(L"PRONTO · Nessun leak su schede fisiche", L"READY · Zero leak on physical NICs"), g_vpn_active ? green : muted, g_small);
+            const wchar_t *dns_audit_desc = (g_setting_dns_mode == 0) ?
+            (g_setting_fake_ip ? LTXT(L"PASS · Query confinate nel tunnel (198.18.0.2 MapDNS)", L"PASS · Queries confined to tunnel (198.18.0.2 MapDNS)") :
+                                 LTXT(L"PASS · Query su Tor DNSPort (IP pubblici reali)", L"PASS · Queries via Tor DNSPort (Real public IPs)")) :
+            ((g_setting_dns_mode == 1) ? LTXT(L"PASS · Query cifrate Cloudflare 1.1.1.1 (via Tor)", L"PASS · Encrypted Cloudflare 1.1.1.1 (via Tor)") :
+            ((g_setting_dns_mode == 2) ? LTXT(L"PASS · Query cifrate Quad9 9.9.9.9 (via Tor)", L"PASS · Encrypted Quad9 9.9.9.9 (via Tor)") :
+                                         LTXT(L"PASS · Query cifrate Custom DNS (via Tor)", L"PASS · Encrypted Custom DNS (via Tor)")));
+        text(dc, 290, 142, g_vpn_active ? dns_audit_desc : LTXT(L"PRONTO · Nessun leak su schede fisiche", L"READY · Zero leak on physical NICs"), g_vpn_active ? green : muted, g_small);
 
     /* Row 3 */
     dot(dc, 46, 170, 8, g_vpn_active ? green : teal);
@@ -4053,7 +4067,7 @@ static void paint_dc(HDC dc, int w, int h) {
         int item2_y = r1_y + 12;
         dot(dc, m.col2_x + 28, item2_y + 4, 10, g_vpn_active ? green : RGB(171, 109, 0));
         text(dc, m.col2_x + 50, item2_y, LTXT(L"Protezione DNS", L"DNS protection"), white, g_font);
-        const wchar_t *dns_label = (g_setting_dns_mode == 0) ? L"MapDNS 198.18.0.2 (Tor)" :
+        const wchar_t *dns_label = (g_setting_dns_mode == 0) ? (g_setting_fake_ip ? L"MapDNS 198.18.0.2 (Tor)" : L"Tor Native DNS (Real IP)") :
                                    ((g_setting_dns_mode == 1) ? L"Cloudflare 1.1.1.1 (Tor)" :
                                    ((g_setting_dns_mode == 2) ? L"Quad9 9.9.9.9 (Tor)" : g_setting_custom_dns_ip));
         wchar_t dns_info_text[128];
@@ -4358,7 +4372,7 @@ static void paint_dc(HDC dc, int w, int h) {
 
         draw_toggle_col(dc, m.mx + 28, 314 + 2 * row_step, col1_sw_x, g_setting_fake_ip,
             LTXT(L"Motore Fake-IP Pool 198.18.0.0/15 & .onion", L"Fake-IP Engine (198.18.0.0/15) & .onion"),
-            LTXT(L"Risoluzione DNS locale a 0 ms e routing trasparente domini .onion.", L"Instant 0-ms local DNS response and transparent .onion routing."));
+            LTXT(L"Risoluzione DNS a 0 ms con IP sintetici. Disattiva per ottenere IP pubblici reali (consigliato per Docker/WSL).", L"0-ms DNS with synthetic IPs. Disable to resolve real public IPs (recommended for Docker/WSL)."));
 
         draw_toggle_col(dc, m.mx + 28, 314 + 3 * row_step, col1_sw_x, g_setting_pipeline_mode,
             LTXT(L"Ottimizzazione Pipeline Driver Wintun", L"Wintun Driver Pipeline Optimization"),

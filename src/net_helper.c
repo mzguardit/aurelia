@@ -1,3 +1,6 @@
+#ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -96,6 +99,385 @@ static void helper_trace(const wchar_t *stage) {
     SYSTEMTIME t;GetLocalTime(&t);wchar_t row[256];
     int n=_snwprintf_s(row,_countof(row),_TRUNCATE,L"%04u-%02u-%02u %02u:%02u:%02u %s\r\n",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,stage);
     DWORD done=0;WriteFile(f,row,(DWORD)(n*sizeof(wchar_t)),&done,NULL);CloseHandle(f);
+}
+
+static HANDLE bridge_thread = NULL;
+static volatile LONG bridge_running = 0;
+static SOCKET bridge_listen_sock = INVALID_SOCKET;
+static int bridge_dns_mode = 0;
+static char bridge_custom_dns_ip[64] = "1.1.1.1";
+
+static int resolve_dns_query(int dns_mode, const char *custom_ip, const char *query, int qlen, char *resp, int max_resp) {
+    if(dns_mode == 0) {
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if(s == INVALID_SOCKET) return 0;
+        DWORD to = 4000;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+        struct sockaddr_in sin;
+        ZeroMemory(&sin, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_port = htons(9053);
+        sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+        int sent = sendto(s, query, qlen, 0, (struct sockaddr*)&sin, sizeof(sin));
+        if(sent != qlen) { closesocket(s); return 0; }
+        int n = recv(s, resp, max_resp, 0);
+        closesocket(s);
+        return (n > 0) ? n : 0;
+    }
+
+    const char *target_ip = "9.9.9.9";
+    if(dns_mode == 1) target_ip = "1.1.1.1";
+    else if(dns_mode == 3 && custom_ip && custom_ip[0]) target_ip = custom_ip;
+
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(s == INVALID_SOCKET) return 0;
+    DWORD to = 6000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+
+    struct sockaddr_in tor_sin;
+    ZeroMemory(&tor_sin, sizeof(tor_sin));
+    tor_sin.sin_family = AF_INET;
+    tor_sin.sin_port = htons(9050);
+    tor_sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if(connect(s, (struct sockaddr*)&tor_sin, sizeof(tor_sin)) != 0) {
+        closesocket(s);
+        return 0;
+    }
+
+    if(send(s, "\x05\x01\x00", 3, 0) != 3) { closesocket(s); return 0; }
+    char auth_rep[2];
+    if(recv(s, auth_rep, 2, 0) != 2 || auth_rep[1] != 0) { closesocket(s); return 0; }
+
+    unsigned long ip = inet_addr(target_ip);
+    char conn_req[10] = { 0x05, 0x01, 0x00, 0x01 };
+    memcpy(conn_req + 4, &ip, 4);
+    conn_req[8] = 0; conn_req[9] = 53;
+    if(send(s, conn_req, 10, 0) != 10) { closesocket(s); return 0; }
+    char conn_rep[10];
+    if(recv(s, conn_rep, 10, 0) < 10 || conn_rep[1] != 0) { closesocket(s); return 0; }
+
+    unsigned short qlen_be = htons((unsigned short)qlen);
+    if(send(s, (const char*)&qlen_be, 2, 0) != 2) { closesocket(s); return 0; }
+    if(send(s, query, qlen, 0) != qlen) { closesocket(s); return 0; }
+
+    unsigned short rlen_be = 0;
+    if(recv(s, (char*)&rlen_be, 2, 0) != 2) { closesocket(s); return 0; }
+    int rlen = ntohs(rlen_be);
+    if(rlen <= 0 || rlen > max_resp) { closesocket(s); return 0; }
+
+    int total = 0;
+    while(total < rlen) {
+        int got = recv(s, resp + total, rlen - total, 0);
+        if(got <= 0) break;
+        total += got;
+    }
+    closesocket(s);
+    return total;
+}
+
+static DWORD WINAPI bridge_worker_thread(LPVOID arg) {
+    SOCKET client = (SOCKET)(ULONG_PTR)arg;
+    DWORD to = 5000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+
+    char greet[258];
+    int gr = recv(client, greet, sizeof(greet), 0);
+    if(gr < 3 || greet[0] != 0x05) { closesocket(client); return 0; }
+    if(send(client, "\x05\x00", 2, 0) != 2) { closesocket(client); return 0; }
+
+    char req[512];
+    int rlen = recv(client, req, sizeof(req), 0);
+    if(rlen < 7 || req[0] != 0x05) { closesocket(client); return 0; }
+
+    BYTE cmd = (BYTE)req[1];
+
+    if(cmd == 0x01) { // CONNECT
+        SOCKET tor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if(tor == INVALID_SOCKET) {
+            char fail[10] = { 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+            send(client, fail, 10, 0);
+            closesocket(client);
+            return 0;
+        }
+        DWORD tor_to = 8000;
+        setsockopt(tor, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tor_to, sizeof(tor_to));
+        setsockopt(tor, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tor_to, sizeof(tor_to));
+
+        struct sockaddr_in tor_sin;
+        ZeroMemory(&tor_sin, sizeof(tor_sin));
+        tor_sin.sin_family = AF_INET;
+        tor_sin.sin_port = htons(9050);
+        tor_sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+        if(connect(tor, (struct sockaddr*)&tor_sin, sizeof(tor_sin)) != 0) {
+            char fail[10] = { 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+            send(client, fail, 10, 0);
+            closesocket(tor);
+            closesocket(client);
+            return 0;
+        }
+
+        send(tor, "\x05\x01\x00", 3, 0);
+        char tor_auth[2];
+        if(recv(tor, tor_auth, 2, 0) != 2 || tor_auth[1] != 0) {
+            char fail[10] = { 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+            send(client, fail, 10, 0);
+            closesocket(tor);
+            closesocket(client);
+            return 0;
+        }
+
+        if(send(tor, req, rlen, 0) != rlen) {
+            closesocket(tor);
+            closesocket(client);
+            return 0;
+        }
+
+        char tor_rep[512];
+        int tr = recv(tor, tor_rep, sizeof(tor_rep), 0);
+        if(tr < 10 || tor_rep[1] != 0) {
+            if(tr > 0) send(client, tor_rep, tr, 0);
+            closesocket(tor);
+            closesocket(client);
+            return 0;
+        }
+
+        send(client, tor_rep, tr, 0);
+
+        DWORD zero_to = 0;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zero_to, sizeof(zero_to));
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&zero_to, sizeof(zero_to));
+        setsockopt(tor, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zero_to, sizeof(zero_to));
+        setsockopt(tor, SOL_SOCKET, SO_SNDTIMEO, (const char*)&zero_to, sizeof(zero_to));
+
+        char buf[16384];
+        for(;;) {
+            if(!bridge_running) break;
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(client, &fds);
+            FD_SET(tor, &fds);
+            struct timeval tv; tv.tv_sec = 120; tv.tv_usec = 0;
+            int r = select(0, &fds, NULL, NULL, &tv);
+            if(r <= 0) break;
+            if(FD_ISSET(client, &fds)) {
+                int got = recv(client, buf, sizeof(buf), 0);
+                if(got <= 0) break;
+                if(send(tor, buf, got, 0) != got) break;
+            }
+            if(FD_ISSET(tor, &fds)) {
+                int got = recv(tor, buf, sizeof(buf), 0);
+                if(got <= 0) break;
+                if(send(client, buf, got, 0) != got) break;
+            }
+        }
+        closesocket(tor);
+        closesocket(client);
+        return 0;
+    }
+
+    if(cmd == 0x03) { // UDP ASSOCIATE
+        SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if(udp_sock == INVALID_SOCKET) {
+            char fail[10] = { 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+            send(client, fail, 10, 0);
+            closesocket(client);
+            return 0;
+        }
+
+        struct sockaddr_in sin;
+        ZeroMemory(&sin, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+        sin.sin_port = 0;
+        if(bind(udp_sock, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
+            char fail[10] = { 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+            send(client, fail, 10, 0);
+            closesocket(udp_sock);
+            closesocket(client);
+            return 0;
+        }
+
+        int slen = sizeof(sin);
+        getsockname(udp_sock, (struct sockaddr*)&sin, &slen);
+        unsigned short port_n = sin.sin_port;
+
+        char succ[10] = { 0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1 };
+        memcpy(succ + 8, &port_n, 2);
+        if(send(client, succ, 10, 0) != 10) {
+            closesocket(udp_sock);
+            closesocket(client);
+            return 0;
+        }
+
+        for(;;) {
+            if(!bridge_running) break;
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(client, &fds);
+            FD_SET(udp_sock, &fds);
+            struct timeval tv; tv.tv_sec = 2; tv.tv_usec = 0;
+            int r = select(0, &fds, NULL, NULL, &tv);
+            if(r < 0) break;
+            if(r == 0) continue;
+
+            if(FD_ISSET(client, &fds)) {
+                char peek;
+                int pr = recv(client, &peek, 1, MSG_PEEK);
+                if(pr <= 0) break;
+            }
+
+            if(FD_ISSET(udp_sock, &fds)) {
+                struct sockaddr_in from;
+                int fromlen = sizeof(from);
+                char udp_buf[4096];
+                int ulen = recvfrom(udp_sock, udp_buf, sizeof(udp_buf), 0, (struct sockaddr*)&from, &fromlen);
+                if(ulen < 10) continue;
+
+                int hdr_len = 0;
+                if(udp_buf[3] == 1) {
+                    hdr_len = 10;
+                } else if(udp_buf[3] == 3) {
+                    int dlen = (unsigned char)udp_buf[4];
+                    hdr_len = 5 + dlen + 2;
+                } else if(udp_buf[3] == 4) {
+                    hdr_len = 22;
+                }
+                if(hdr_len == 0 || ulen <= hdr_len) continue;
+                /* Only DNS (dest port 53) is answered: Tor cannot carry other UDP. */
+                if((((unsigned char)udp_buf[hdr_len-2] << 8) | (unsigned char)udp_buf[hdr_len-1]) != 53) continue;
+
+                const char *dns_query = udp_buf + hdr_len;
+                int qlen = ulen - hdr_len;
+
+                char dns_resp[4096];
+                int resp_len = resolve_dns_query(bridge_dns_mode, bridge_custom_dns_ip, dns_query, qlen, dns_resp, sizeof(dns_resp));
+                if(resp_len > 0) {
+                    char out_buf[4096 + 64];
+                    memcpy(out_buf, udp_buf, hdr_len);
+                    memcpy(out_buf + hdr_len, dns_resp, resp_len);
+                    sendto(udp_sock, out_buf, hdr_len + resp_len, 0, (struct sockaddr*)&from, fromlen);
+                }
+            }
+        }
+        closesocket(udp_sock);
+        closesocket(client);
+        return 0;
+    }
+
+    char unsupp[10] = { 0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+    send(client, unsupp, 10, 0);
+    closesocket(client);
+    return 0;
+}
+
+static DWORD WINAPI bridge_listener_thread(LPVOID arg) {
+    (void)arg;
+    bridge_listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(bridge_listen_sock == INVALID_SOCKET) {
+        wchar_t m[96];_snwprintf_s(m,_countof(m),_TRUNCATE,L"bridge socket() failed WSA=%d",WSAGetLastError());helper_trace(m);
+        return 1;
+    }
+
+    int opt = 1;
+    setsockopt(bridge_listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    struct sockaddr_in sin;
+    ZeroMemory(&sin, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(9054);
+    sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if(bind(bridge_listen_sock, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
+        closesocket(bridge_listen_sock);
+        bridge_listen_sock = INVALID_SOCKET;
+        helper_trace(L"bridge bind failed on 127.0.0.1:9054");
+        return 2;
+    }
+
+    if(listen(bridge_listen_sock, 64) != 0) {
+        closesocket(bridge_listen_sock);
+        bridge_listen_sock = INVALID_SOCKET;
+        helper_trace(L"bridge listen failed on 127.0.0.1:9054");
+        return 3;
+    }
+
+    helper_trace(L"bridge listener started on 127.0.0.1:9054");
+
+    while(bridge_running) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(bridge_listen_sock, &fds);
+        struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
+        int r = select(0, &fds, NULL, NULL, &tv);
+        if(r < 0) break;
+        if(r == 0) continue;
+
+        SOCKET client = accept(bridge_listen_sock, NULL, NULL);
+        if(client != INVALID_SOCKET) {
+            HANDLE th = CreateThread(NULL, 0, bridge_worker_thread, (LPVOID)(ULONG_PTR)client, 0, NULL);
+            if(th) CloseHandle(th);
+            else closesocket(client);
+        }
+    }
+
+    if(bridge_listen_sock != INVALID_SOCKET) {
+        closesocket(bridge_listen_sock);
+        bridge_listen_sock = INVALID_SOCKET;
+    }
+    helper_trace(L"bridge listener stopped");
+    return 0;
+}
+
+static void bridge_start(int dns_mode, const wchar_t *custom_ip_w) {
+    if(bridge_running) return;
+    {
+        /* aurelia-net.exe never initialised Winsock: without this every
+           socket() in the bridge fails with WSANOTINITIALISED and nothing
+           listens on 127.0.0.1:9054, so the tunnel has no upstream. */
+        static int wsa_ready = 0;
+        if(!wsa_ready) {
+            WSADATA wsa;
+            int wr = WSAStartup(MAKEWORD(2,2), &wsa);
+            if(wr != 0) {
+                wchar_t m[96];_snwprintf_s(m,_countof(m),_TRUNCATE,L"bridge WSAStartup failed error=%d",wr);helper_trace(m);
+                return;
+            }
+            wsa_ready = 1;
+        }
+    }
+    bridge_dns_mode = dns_mode;
+    bridge_custom_dns_ip[0] = 0;
+    if(custom_ip_w && custom_ip_w[0]) {
+        WideCharToMultiByte(CP_ACP, 0, custom_ip_w, -1, bridge_custom_dns_ip, sizeof(bridge_custom_dns_ip), NULL, NULL);
+    }
+    bridge_running = 1;
+    bridge_thread = CreateThread(NULL, 0, bridge_listener_thread, NULL, 0, NULL);
+    if(!bridge_thread) {
+        bridge_running = 0;
+        helper_trace(L"failed to start bridge listener thread");
+    } else {
+        helper_trace(L"bridge listener thread created");
+    }
+}
+
+static void bridge_stop(void) {
+    if(!bridge_running) return;
+    bridge_running = 0;
+    if(bridge_listen_sock != INVALID_SOCKET) {
+        closesocket(bridge_listen_sock);
+        bridge_listen_sock = INVALID_SOCKET;
+    }
+    if(bridge_thread) {
+        WaitForSingleObject(bridge_thread, 3000);
+        CloseHandle(bridge_thread);
+        bridge_thread = NULL;
+    }
+    helper_trace(L"bridge stopped");
 }
 
 static int state_write_locked(void) {
@@ -306,7 +688,7 @@ static int firewall_arm(const wchar_t *tor_path) {
     int ok=SUCCEEDED(hr);
     if(!ok){wchar_t m[96];_snwprintf_s(m,_countof(m),_TRUNCATE,L"firewall rules query failed HRESULT=0x%08lX",(DWORD)hr);helper_trace(m);}
     if(ok&&!add_rule(rules,RULE_TOR,tor_path,NULL,NULL,NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding Tor firewall rule failed");ok=0;}
-    if(ok&&!add_rule(rules,RULE_LOOP,NULL,L"127.0.0.1",L"9050,9052",NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local SOCKS firewall rule failed");ok=0;}
+    if(ok&&!add_rule(rules,RULE_LOOP,NULL,L"127.0.0.1",NULL,NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local loopback firewall rule failed");ok=0;}
     if(ok&&!add_rule(rules,RULE_CONTROL,NULL,L"127.0.0.1",L"9051",NULL,NET_FW_PROFILE2_ALL)){helper_trace(L"adding local control firewall rule failed");ok=0;}
     if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_UDP,IPPROTO_UDP)){helper_trace(L"adding physical DNS UDP block rule failed");}
     if(ok&&!add_block_dns_rule(rules,RULE_BLOCK_DNS_TCP,IPPROTO_TCP)){helper_trace(L"adding physical DNS TCP block rule failed");}
@@ -499,7 +881,23 @@ static int route_up(DWORD tun_index) {
             state.dns_saved=TRUE;
             FreeInterfaceDnsSettings(&old);
         }
-        DNS_INTERFACE_SETTINGS set;ZeroMemory(&set,sizeof(set));set.Version=DNS_INTERFACE_SETTINGS_VERSION1;set.Flags=DNS_SETTING_NAMESERVER;set.NameServer=L"198.18.0.2";
+        wchar_t ini[MAX_PATH];
+        wchar_t *local_dir = _wgetenv(L"LOCALAPPDATA");
+        _snwprintf_s(ini, MAX_PATH, _TRUNCATE, L"%s\\Aurelia\\settings.ini", local_dir ? local_dir : L"C:\\ProgramData");
+        int dns_m = GetPrivateProfileIntW(L"Settings", L"DnsMode", 0, ini);
+        wchar_t dns_srv[128] = L"198.18.0.2";
+        if(dns_m == 1) {
+            wcscpy_s(dns_srv, _countof(dns_srv), L"1.1.1.1");
+        } else if(dns_m == 2) {
+            wcscpy_s(dns_srv, _countof(dns_srv), L"9.9.9.9");
+        } else if(dns_m == 3) {
+            GetPrivateProfileStringW(L"Settings", L"CustomDnsIp", L"1.1.1.1", dns_srv, _countof(dns_srv), ini);
+            if(!dns_srv[0]) wcscpy_s(dns_srv, _countof(dns_srv), L"1.1.1.1");
+        } else {
+            wcscpy_s(dns_srv, _countof(dns_srv), L"198.18.0.2");
+        }
+
+        DNS_INTERFACE_SETTINGS set;ZeroMemory(&set,sizeof(set));set.Version=DNS_INTERFACE_SETTINGS_VERSION1;set.Flags=DNS_SETTING_NAMESERVER;set.NameServer=dns_srv;
         ok=SetInterfaceDnsSettings(guid,&set)==NO_ERROR;
         if(ok) apply_dns_leak_policy(1);
     }
@@ -550,6 +948,17 @@ static int helper_start(void) {
     if(w==WAIT_OBJECT_0||w==WAIT_OBJECT_0+1){firewall_restore();return 0;}
     if(w!=WAIT_OBJECT_0+2){firewall_restore();return 14;}
     helper_trace(L"Tor ready signal received");
+    wchar_t ini_b[MAX_PATH];
+    wchar_t *local_dir_b = _wgetenv(L"LOCALAPPDATA");
+    _snwprintf_s(ini_b, MAX_PATH, _TRUNCATE, L"%s\\Aurelia\\settings.ini", local_dir_b ? local_dir_b : L"C:\\ProgramData");
+    int dns_mode = GetPrivateProfileIntW(L"Settings", L"DnsMode", 0, ini_b);
+    int fake_ip = GetPrivateProfileIntW(L"Settings", L"FakeIpPool", 1, ini_b);
+    wchar_t custom_ip[64] = {0};
+    GetPrivateProfileStringW(L"Settings", L"CustomDnsIp", L"1.1.1.1", custom_ip, _countof(custom_ip), ini_b);
+    int use_fake = (fake_ip && dns_mode == 0);
+    if(!use_fake) {
+        bridge_start(dns_mode, custom_ip);
+    }
     wchar_t module_dir[MAX_PATH];DWORD n=GetModuleFileNameW(NULL,module_dir,MAX_PATH);if(!n||n>=MAX_PATH){firewall_restore();return 15;}
     wchar_t *slash=wcsrchr(module_dir,L'\\');if(slash)*slash=0;
     wchar_t hev_path[MAX_PATH];_snwprintf_s(hev_path,MAX_PATH,_TRUNCATE,L"%s\\hev-socks5-tunnel.dll",module_dir);
@@ -573,6 +982,7 @@ static int helper_start(void) {
     WaitForSingleObject(tunnel_thread,30000);
     if(WaitForSingleObject(tunnel_thread,0)==WAIT_TIMEOUT){TerminateThread(tunnel_thread,1);}
     CloseHandle(tunnel_thread);tunnel_thread=NULL;FreeLibrary(hev_module);hev_module=NULL;
+    bridge_stop();
     if(state.tunnel_index)route_down();
     helper_trace(L"restoring routes and firewall");firewall_restore();helper_trace(L"helper cleanup complete");return 0;
 }
